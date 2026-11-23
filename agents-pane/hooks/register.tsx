@@ -2,15 +2,37 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, Ledger } from '../types'
-import { since, snapOf, splitCells, sync, tokensText, typeColor, usdText } from './pricing'
+import { addUsage, costRecord, isSafeId, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
 const tick = atom({ plugin: 'agents-pane', key: 'tick' } as const, 0)
 // Every subagent of the session, also after Claude Code drops it from its own list.
-const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, { types: [], order: [], agents: {} } as Ledger, {
-  shape: 'ledger-1',
-})
+const EMPTY: Ledger = {
+  sessionId: '',
+  types: [],
+  order: [],
+  agents: {},
+  main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  mainTurns: 0,
+  sessionUsd: null,
+}
+const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-3' })
+
+// Start the ledger over when the session id changed (/clear). The first id seen is adopted.
+// Resolves the id, so a caller can drop a reading taken under another session.
+async function ensureSession($: EngineInterface): Promise<string> {
+  const id = await $.session.id()
+  const l = await read($, ledger)
+  if (l.sessionId === id) return id
+  await update($, ledger, current =>
+    current.sessionId === id ? current : current.sessionId === '' ? { ...current, sessionId: id } : { ...EMPTY, sessionId: id },
+  )
+  return id
+}
+
+// True when a reading taken under session `id` still belongs to the ledger ('' = the id is unknown).
+const isSameSession = (l: Ledger, id: string) => id === '' || l.sessionId === '' || l.sessionId === id
 
 const STATUS: Record<string, { icon: string; color: string; word: string }> = {
   pending: { icon: '○', color: 'inactive', word: 'waiting to start' },
@@ -27,17 +49,54 @@ const LIVE = ['running', 'waiting', 'pending']
 
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
+  const id = await ensureSession($).catch(() => '')
+  // Without the session id a reading cannot be placed safely: skip it; the next one comes in 2 s.
+  if (id === '') return
   const list = (await $.agent.list()).filter(a => a.kind === 'local_agent')
   const t = Date.now()
   const before = await read($, ledger)
   const after = sync(before, list.map(snapOf), t)
-  if (after !== before) await update($, ledger, current => sync(current, list.map(snapOf), t))
+  // A reading taken before a /clear reset is dropped, so the old session's agents do not come back.
+  if (after !== before) await update($, ledger, current => (isSameSession(current, id) ? sync(current, list.map(snapOf), t) : current))
+  const usd = (await $.session.usage()).cost?.usd ?? null
+  // The /cost total only grows within a session: an older reading that lands late never lowers it.
+  if (usd !== null && usd !== before.sessionUsd) {
+    await update($, ledger, current =>
+      isSameSession(current, id) && (current.sessionUsd === null || current.sessionUsd < usd) ? { ...current, sessionUsd: usd } : current,
+    )
+  }
 }
 
 function shortModel(id: string | null): string {
   if (!id) return '?'
   const m = /(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/i.exec(id)
   return m ? `${m[1]?.toLowerCase()} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
+}
+
+// Save the /cost record where the token-log Stop hook picks it up and pushes it with its rows.
+// TOKEN_LOG=off turns it off, as it does the hook; TOKEN_LOG_HOME moves it, as it does the hook's files.
+async function writeCost($: EngineInterface, seq: number): Promise<void> {
+  if ((await $.env.get('TOKEN_LOG')) === 'off') return
+  const home = (await $.env.get('HOME')) ?? ''
+  const base = (await $.env.get('TOKEN_LOG_HOME')) || (home === '' ? '' : `${home}/.claude/token-log`)
+  const id = await $.session.id()
+  if (!base.startsWith('/') || !isSafeId(id)) return
+  // Read the ledger now, inside the queue, so the last write holds the newest figures.
+  const l = await read($, ledger)
+  // Never write one session's figures under another session's id.
+  if (l.sessionId !== '' && l.sessionId !== id) return
+  const record = costRecord(l, id, Date.now())
+  // A newer write is queued: it reads newer figures, so this one is skipped.
+  if (seq !== writes.seq) return
+  await $.fs.write(`${base}/cost/${id}.json`, `${JSON.stringify(record, null, 1)}\n`)
+}
+
+// One write at a time, the newest only. A write that is already under way when a newer one starts may still
+// land after it (a slow disk); the next turn's write corrects that.
+const writes: { last: Promise<void>; seq: number } = { last: Promise.resolve(), seq: 0 }
+function saveCost($: EngineInterface): void {
+  const seq = ++writes.seq
+  writes.last = writes.last.then(() => writeCost($, seq)).catch(() => {})
 }
 
 const runMs = (a: AgentSnap, now: number) => Math.max(0, (a.endTime ?? now) - a.startTime)
@@ -85,8 +144,31 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId !== undefined) await refresh($).catch(() => {})
+    try {
+      // A turn with no usage (interrupted, or ended by an API error) adds no tokens and no turn.
+      if (e.agentId === undefined && e.usage !== undefined) {
+        const u = e.usage
+        await ensureSession($).catch(() => {})
+        await update($, ledger, l => ({ ...l, main: addUsage(l.main, u), mainTurns: l.mainTurns + 1 }))
+      }
+    } catch {}
+    // Each step on its own: a failed refresh must not stop this turn's record.
+    await refresh($).catch(() => {})
+    // From a timer, so the turn end never waits for the disk. The token-log hook reads the file when it
+    // pushes, in the background, so this turn's figures are there in time.
+    try {
+      await $.clock.after(1, async () => saveCost($))
+    } catch {}
     return result
+  })
+
+  // The last turn's timer can be lost when the session ends right after it: write once more, directly.
+  on('session.end', async ($, e, next) => {
+    try {
+      saveCost($)
+      await writes.last
+    } catch {}
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -98,14 +180,49 @@ export const register: Register = on => {
     const colorOf = (type: string) => typeColor(l.types.indexOf(type), isTerminal)
     const all = l.order.map(id => l.agents[id]).filter((a): a is AgentSnap => a !== undefined)
 
+    // The whole session: the main conversation beside the subagents. The main cost is the session's /cost
+    // total less the subagents', so it also holds mods' own model calls.
+    const subUsd = all.reduce((n, a) => n + (a.usd ?? 0), 0)
+    const subTokens = all.reduce((n, a) => n + splitTotal(a.tokens), 0)
+    const mainTokens = splitTotal(l.main)
+    const mainUsd = l.sessionUsd === null ? undefined : Math.max(0, l.sessionUsd - subUsd)
+    const row = (key: string, label: string, tok: string, cost: string, strong = false) => (
+      <Box key={key} flexDirection="row" flexWrap="nowrap" columnGap={2}>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text wrap="end" maxLines={1} {...(strong ? { weight: 'semibold' } : { dimColor: true })}>
+            {label}
+          </Text>
+        </Box>
+        <Text tabular dimColor wrap="clip">
+          {tok}
+        </Text>
+        <Text tabular wrap="clip" {...(strong ? { weight: 'semibold' } : {})}>
+          {cost}
+        </Text>
+      </Box>
+    )
+    const sessionBlock = (
+      <Box key="session" flexDirection="column" paddingX={1}>
+        <Text dimColor size="caption" weight="semibold">
+          SESSION
+        </Text>
+        {row('main', `Main conversation · ${l.mainTurns} turn${l.mainTurns === 1 ? '' : 's'}`, `${tokensText(mainTokens)} tok`, usdText(mainUsd))}
+        {row('sub', `Subagents · ${all.length}`, `${tokensText(subTokens)} tok`, usdText(all.length > 0 ? subUsd : 0))}
+        {row('total', 'Session total', `${tokensText(mainTokens + subTokens)} tok`, usdText(l.sessionUsd ?? undefined), true)}
+      </Box>
+    )
+
     if (all.length === 0) {
       return (
-        <Box flexDirection="column" padding={1} rowGap={1}>
-          <Text weight="semibold">No subagents yet</Text>
-          <Text dimColor size="footnote" wrap="wrap">
-            Each subagent shows here with its task, model, tokens, run time and cost (the same estimate as /cost). The
-            totals keep every agent of the session.
-          </Text>
+        <Box flexDirection="column" paddingY={1} rowGap={1}>
+          {sessionBlock}
+          <Box flexDirection="column" paddingX={1} rowGap={1}>
+            <Text weight="semibold">No subagents yet</Text>
+            <Text dimColor size="footnote" wrap="wrap">
+              Each subagent shows here with its task, model, tokens, run time and cost (the same estimate as /cost). The
+              totals keep every agent of the session.
+            </Text>
+          </Box>
         </Box>
       )
     }
@@ -220,6 +337,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" rowGap={1}>
+        {sessionBlock}
         <Box flexDirection="column" paddingX={1}>
           <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={1}>
             <Text weight="bold" wrap="clip">

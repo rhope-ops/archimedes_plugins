@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
+import { costRecord, isSafeId, splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -36,12 +36,21 @@ const agent = (id: string, status: string, usd: number | undefined, startTime: n
   ...(usd === undefined ? {} : { cost: { usd } }),
 })
 
+// The session's /cost total the engine reports; a test sets it.
+let sessionUsd = 0
+let sessionIdNow = 'sess-1'
+
 async function setup($: any, on: any, list: () => unknown[]) {
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('clock.every', () => ({ value: undefined }))
+  // The harness runs a timer's callback as soon as this answers.
+  on('clock.after', () => ({ value: undefined }))
   on('turn.complete', () => ({ text: '' }))
+  // The engine always has a session id; a test sets `sessionIdNow`.
+  on('session.id', () => ({ value: sessionIdNow }))
   on('agent.list', () => ({ value: list() as never }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: sessionUsd } } as never }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 }
 
@@ -131,7 +140,7 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
 })
 
 test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
-  const empty = { types: [], order: [], agents: {} }
+  const empty = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
   const snap = (id: string, type: string, status: string, out: number) => ({
     id,
     description: id,
@@ -180,4 +189,110 @@ test('splitCells: exact width, at least one cell per part with a share', async (
   expect(splitCells(10, [1, 1, 1])).toEqual([4, 3, 3])
   expect(splitCells(10, [100, 0.01])).toEqual([9, 1])
   expect(splitCells(5, [0, 0])).toEqual([0, 0])
+})
+
+test('the session block: main conversation beside the subagents, and the session total', async ($, on) => {
+  const now = Date.now()
+  sessionUsd = 3.0
+  await setup($, on, () => [agent('a1', 'completed', 0.75, now - 60_000)])
+  // Two main-loop turns: their usage adds up.
+  for (const id of ['m1', 'm2']) {
+    await $.turn.complete({
+      turnId: id,
+      ...DONE,
+      usage: { model: 'claude-opus-5-5', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 2000 },
+    } as never)
+  }
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const texts = await paneTexts($, surface)
+    expect(texts).toContain('SESSION')
+    expect(texts).toContain('Main conversation · 2 turns')
+    expect(texts).toContain('47.0k tok')
+    // $3.00 for the session, less $0.75 for the subagent.
+    expect(texts).toContain('$2.25')
+    expect(texts).toContain('Subagents · 1')
+    expect(texts).toContain('Session total')
+    expect(texts).toContain('$3.00')
+    expect(texts).toContain('53.5k tok')
+  }
+  sessionUsd = 0
+})
+
+test('each turn end writes the /cost record where the token-log hook reads it', async ($, on) => {
+  const now = Date.now()
+  const files = new Map<string, string>()
+  const env: Record<string, string | undefined> = { HOME: '/home/t', TOKEN_LOG: undefined, TOKEN_LOG_HOME: undefined }
+  sessionUsd = 2.0
+  on('env.get', (_: unknown, e: { name: string }) => ({ value: env[e.name] }))
+  on('fs.write', (_: unknown, e: { path: string; text: string }) => (files.set(e.path, e.text), { value: undefined }))
+  await setup($, on, () => [agent('a1', 'completed', 0.5, now - 60_000, 'Explore')])
+  await $.turn.complete({
+    turnId: 'm1',
+    ...DONE,
+    usage: { model: 'claude-opus-5-5', input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 },
+  } as never)
+  // The write runs from a timer, after the turn end: wait for it (each $ call is one round trip).
+  // Wait until the file is there (or, when none is due, a fixed number of round trips).
+  const settle = async (isDue = true) => {
+    for (let i = 0; i < 20 && (!isDue || files.size === 0); i++) await paneTexts($, 'desktop')
+  }
+  await settle()
+  const text = files.get('/home/t/.claude/token-log/cost/sess-1.json')
+  expect(text).toBeDefined()
+  const r = JSON.parse(text ?? '{}')
+  expect(r.version).toBe(1)
+  expect(r.session_usd).toBe(2)
+  expect(r.main_usd).toBe(1.5)
+  expect(r.subagents_usd).toBe(0.5)
+  expect(r.main).toEqual({ turns: 1, input: 10, output: 20, cache_read: 30, cache_write: 40 })
+  expect(r.subagents[0].type).toBe('Explore')
+  // No task text in the record.
+  expect(text).not.toContain('Task a1')
+
+  // TOKEN_LOG_HOME moves it; TOKEN_LOG=off stops it.
+  files.clear()
+  env.TOKEN_LOG_HOME = '/var/tl'
+  await $.turn.complete({ turnId: 'm2', ...DONE } as never)
+  await settle()
+  expect([...files.keys()]).toEqual(['/var/tl/cost/sess-1.json'])
+  files.clear()
+  env.TOKEN_LOG = 'off'
+  await $.turn.complete({ turnId: 'm3', ...DONE } as never)
+  await settle(false)
+  expect(files.size).toBe(0)
+  sessionUsd = 0
+})
+
+test('cost record: no session cost yet gives null main cost; unsafe ids are refused', async () => {
+  const l = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  expect(costRecord(l, 's', 0).main_usd).toBeNull()
+  expect(isSafeId('216be8a9-f390-5737-904e-8abe3708475f')).toBe(true)
+  expect(isSafeId('../x')).toBe(false)
+  expect(isSafeId('a/b')).toBe(false)
+})
+
+test('a subagent turn with usage does not count as main; /clear starts the ledger over', async ($, on) => {
+  const now = Date.now()
+  sessionIdNow = 'sess-1'
+  sessionUsd = 1.0
+  await setup($, on, () => [agent('a1', 'running', 0.25, now - 1000)])
+  const used = { model: 'm', input_tokens: 100, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  await $.turn.complete({ turnId: 'm1', ...DONE, usage: used } as never)
+  await $.turn.complete({ turnId: 's1', agentId: 'a1', ...DONE, usage: used } as never)
+  let texts = await paneTexts($, 'desktop')
+  expect(texts).toContain('Main conversation · 1 turn')
+  expect(texts).toContain('200 tok')
+  // A late, smaller /cost reading does not lower the total.
+  sessionUsd = 0.5
+  await $.turn.complete({ turnId: 's2', agentId: 'a1', ...DONE } as never)
+  expect(await paneTexts($, 'desktop')).toContain('$1.00')
+  // /clear: a new session id, a new ledger.
+  sessionIdNow = 'sess-2'
+  sessionUsd = 0.1
+  await $.turn.complete({ turnId: 'm2', ...DONE, usage: used } as never)
+  texts = await paneTexts($, 'desktop')
+  expect(texts).toContain('Main conversation · 1 turn')
+  expect(texts).toContain('$0.10')
+  sessionUsd = 0
+  sessionIdNow = 'sess-1'
 })

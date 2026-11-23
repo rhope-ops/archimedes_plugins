@@ -3,7 +3,7 @@
 // long prompts and search fees. Source of truth for prices: platform.claude.com/docs/en/about-claude/pricing.
 
 import type { AgentInfo } from 'claude-code'
-import type { AgentSnap, Ledger } from '../types'
+import type { AgentSnap, Ledger, TokenSplit } from '../types'
 
 export type Usage = {
   model: string
@@ -109,8 +109,21 @@ export function sync(before: Ledger, live: readonly AgentSnap[], now: number): L
     }
   }
   if (types.length !== before.types.length || order.length !== before.order.length) changed = true
-  return changed ? { types, order, agents } : before
+  return changed ? { ...before, types, order, agents } : before
 }
+
+// Add one main-loop turn's usage (the API's field names) to the running split.
+export function addUsage(t: TokenSplit, u: Partial<Usage> | undefined): TokenSplit {
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
+  return {
+    input: t.input + n(u?.input_tokens),
+    output: t.output + n(u?.output_tokens),
+    cacheRead: t.cacheRead + n(u?.cache_read_input_tokens),
+    cacheWrite: t.cacheWrite + n(u?.cache_creation_input_tokens),
+  }
+}
+
+export const splitTotal = (t: TokenSplit) => t.input + t.output + t.cacheRead + t.cacheWrite
 
 // Cells of each part of a `width`-cell bar split by `shares` (any scale): every part with a share
 // gets at least 1 cell when it fits, and the cells add up to exactly `width`.
@@ -150,3 +163,66 @@ export function typeColor(slot: number, isTerminal: boolean): string {
   const list = isTerminal ? NAMED : HEX
   return list[(Math.max(0, slot) % list.length + list.length) % list.length] ?? 'gray'
 }
+
+// The /cost record the token-log Stop hook pushes next to its rows (kit scripts/token_log.py reads it).
+// Claude Code's own estimate, as /cost shows it. No task text: only ids, types, models and numbers.
+export type CostRecord = {
+  version: 1
+  session_id: string
+  written_at: string
+  session_usd: number | null
+  main_usd: number | null
+  subagents_usd: number
+  main: { turns: number; input: number; output: number; cache_read: number; cache_write: number }
+  subagents: {
+    agent_id: string
+    type: string
+    model: string | null
+    status: string
+    usd: number | null
+    input: number
+    output: number
+    cache_read: number
+    cache_write: number
+    started_at: string
+    ended_at: string | null
+  }[]
+}
+
+const iso = (ms: number) => new Date(ms).toISOString()
+
+export function costRecord(l: Ledger, sessionId: string, now: number): CostRecord {
+  const agents = l.order.map(id => l.agents[id]).filter((a): a is AgentSnap => a !== undefined)
+  const subUsd = agents.reduce((n, a) => n + (a.usd ?? 0), 0)
+  return {
+    version: 1,
+    session_id: sessionId,
+    written_at: iso(now),
+    session_usd: l.sessionUsd,
+    main_usd: l.sessionUsd === null ? null : Math.max(0, l.sessionUsd - subUsd),
+    subagents_usd: subUsd,
+    main: {
+      turns: l.mainTurns,
+      input: l.main.input,
+      output: l.main.output,
+      cache_read: l.main.cacheRead,
+      cache_write: l.main.cacheWrite,
+    },
+    subagents: agents.map(a => ({
+      agent_id: a.id,
+      type: a.type,
+      model: a.model,
+      status: a.status,
+      usd: a.usd,
+      input: a.tokens.input,
+      output: a.tokens.output,
+      cache_read: a.tokens.cacheRead,
+      cache_write: a.tokens.cacheWrite,
+      started_at: iso(a.startTime),
+      ended_at: a.endTime === null ? null : iso(a.endTime),
+    })),
+  }
+}
+
+// Only a plain id may name the file.
+export const isSafeId = (id: string) => /^[A-Za-z0-9._-]{1,128}$/.test(id) && !id.startsWith('.')

@@ -21,11 +21,18 @@ export type AgentSnap = {
 }
 
 export type Ledger = {
+  // The session these figures belong to. After /clear the id changes and the ledger starts over.
+  sessionId: string
   // Agent types in the order the pane first saw them: the color slot of each type.
   types: string[]
   // Agent ids in spawn order.
   order: string[]
   agents: Record<string, AgentSnap>
+  // The main conversation: its turns' tokens, summed at each turn end.
+  main: TokenSplit
+  mainTurns: number
+  // The whole session's /cost estimate (main, subagents and mods' model calls); null before one exists.
+  sessionUsd: number | null
 }
 
 declare module 'claude-code' {
