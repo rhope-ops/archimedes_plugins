@@ -4,7 +4,7 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | Desktop app: row 1 shows the state and clock at the left, the tool or file that runs now in the middle (cut with … when too long), and steps, tools and time left fixed at the right; row 2 is a bar of whole square blocks; the estimate shows ✓ (green), "N× slower" or "N× faster" (yellow up to 2×, red beyond). Terminal: two rows across the full width | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
+| task-progress | Desktop app: row 1 shows the state and clock at the left, the tool or file that runs now in the middle (cut with … when too long), and steps, tools and time left fixed at the right; row 2, right under it, is a thin shaded block bar (█ fill, ▓▒ edge, ░ track; a moving ░▒▓█▓▒░ glow while the estimate is still learning); the estimate shows ✓ (green), "N× slower" or "N× faster" (yellow up to 2×, red beyond). Terminal: two rows across the full width | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
 | agents-pane | A side pane: running subagents as cards (task, type, model, tokens, run time, cost) and finished ones as compact rows, with totals. Costs are Claude Code's own estimate, the same as `/cost` | `/agents-pane` |
 | advisor-watch | Nothing until the advisor is used in the session. Then a toast for each call, with the caller's model, and a short `advisor ×N` in the status line | `/advisor-stats` (also the all-time count) |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
