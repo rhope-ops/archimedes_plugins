@@ -2,6 +2,9 @@
 // agent), the most complete estimate in a session: it prices 5-minute and 1-hour cache writes, fast mode,
 // long prompts and search fees. Source of truth for prices: platform.claude.com/docs/en/about-claude/pricing.
 
+import type { AgentInfo } from 'claude-code'
+import type { AgentSnap, Ledger } from '../types'
+
 export type Usage = {
   model: string
   input_tokens: number
@@ -36,4 +39,114 @@ export function since(ms: number): string {
   if (s < 60) return `${s}s`
   if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
   return `${Math.floor(s / 3600)}h${String(Math.floor(s / 60) % 60).padStart(2, '0')}`
+}
+
+
+// What the pane keeps of one live agent. endTime is set by `sync`.
+export function snapOf(a: AgentInfo): AgentSnap {
+  const usage = (a.usage ?? []) as readonly Usage[]
+  const sum = (f: (u: Usage) => number) => usage.reduce((n, u) => n + f(u), 0)
+  return {
+    id: a.id,
+    description: a.description,
+    type: a.type,
+    model: a.model ?? null,
+    status: a.status,
+    label: a.label,
+    startTime: a.startTime,
+    endTime: null,
+    tokens: {
+      input: sum(u => u.input_tokens),
+      output: sum(u => u.output_tokens),
+      cacheRead: sum(u => u.cache_read_input_tokens),
+      cacheWrite: sum(u => u.cache_creation_input_tokens),
+    },
+    usd: a.cost?.usd ?? null,
+  }
+}
+
+const ENDED = ['completed', 'failed', 'killed', 'idle']
+
+// Fold the live list into the ledger. Agents missing from the list keep their last snapshot.
+// Returns the same object when nothing changed, so a caller can skip the write.
+export function sync(before: Ledger, live: readonly AgentSnap[], now: number): Ledger {
+  let changed = false
+  const agents = { ...before.agents }
+  const order = [...before.order]
+  const types = [...before.types]
+  for (const s of [...live].sort((x, y) => x.startTime - y.startTime)) {
+    const old = agents[s.id]
+    const isEnded = ENDED.includes(s.status)
+    const endTime = isEnded ? (old?.endTime ?? now) : null
+    // Never let a later reading lower what an earlier one counted.
+    const next: AgentSnap = {
+      ...s,
+      endTime,
+      tokens: old
+        ? {
+            input: Math.max(old.tokens.input, s.tokens.input),
+            output: Math.max(old.tokens.output, s.tokens.output),
+            cacheRead: Math.max(old.tokens.cacheRead, s.tokens.cacheRead),
+            cacheWrite: Math.max(old.tokens.cacheWrite, s.tokens.cacheWrite),
+          }
+        : s.tokens,
+      usd: s.usd ?? old?.usd ?? null,
+    }
+    if (!old) order.push(s.id)
+    if (!types.includes(s.type)) types.push(s.type)
+    if (JSON.stringify(old) !== JSON.stringify(next)) {
+      agents[s.id] = next
+      changed = true
+    }
+  }
+  // A live agent that left the list without a last reading has ended: stop its clock.
+  const seen = new Set(live.map(s => s.id))
+  for (const id of order) {
+    const old = agents[id]
+    if (old && !seen.has(id) && !ENDED.includes(old.status) && old.status !== 'ended') {
+      agents[id] = { ...old, status: 'ended', endTime: now }
+      changed = true
+    }
+  }
+  if (types.length !== before.types.length || order.length !== before.order.length) changed = true
+  return changed ? { types, order, agents } : before
+}
+
+// Cells of each part of a `width`-cell bar split by `shares` (any scale): every part with a share
+// gets at least 1 cell when it fits, and the cells add up to exactly `width`.
+export function splitCells(width: number, shares: readonly number[]): number[] {
+  const w = Math.max(0, Math.floor(width))
+  const total = shares.reduce((n, x) => n + Math.max(0, x), 0)
+  if (w === 0 || total <= 0) return shares.map(() => 0)
+  const raw = shares.map(x => (Math.max(0, x) / total) * w)
+  const cells = raw.map(x => Math.floor(x))
+  // Largest remainders take the cells left over.
+  const order = raw.map((x, i) => [x - Math.floor(x), i] as const).sort((a, b) => b[0] - a[0])
+  let left = w - cells.reduce((n, x) => n + x, 0)
+  for (const [, i] of order) {
+    if (left <= 0) break
+    cells[i] = (cells[i] ?? 0) + 1
+    left--
+  }
+  // A part with a share but no cell borrows one from the largest part.
+  for (let i = 0; i < cells.length; i++) {
+    if ((shares[i] ?? 0) > 0 && cells[i] === 0) {
+      const big = cells.indexOf(Math.max(...cells))
+      if ((cells[big] ?? 0) > 1) {
+        cells[big] = (cells[big] ?? 0) - 1
+        cells[i] = 1
+      }
+    }
+  }
+  return cells
+}
+
+// One color per agent type, in the order the types first appear. The 8 hues of the dataviz
+// reference palette (dark-surface steps); named colors in the terminal. After 8 they repeat.
+const HEX = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767']
+const NAMED = ['blue', 'yellow', 'cyan', 'magenta', 'green', 'blueBright', 'magentaBright', 'red']
+
+export function typeColor(slot: number, isTerminal: boolean): string {
+  const list = isTerminal ? NAMED : HEX
+  return list[(Math.max(0, slot) % list.length + list.length) % list.length] ?? 'gray'
 }

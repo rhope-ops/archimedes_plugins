@@ -4,8 +4,8 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | Desktop app: row 1 shows the state and clock at the left, the tool or file that runs now in the middle (cut with … when too long), and steps, tools and time left fixed at the right; row 2, right under it, is a thin shaded block bar (█ fill, ▓▒ edge, ░ track; a moving ░▒▓█▓▒░ glow while the estimate is still learning); after the turn the estimate shows ✓ (green, when the larger time is at most 1.25× the smaller), "N× slower" or "N× faster" (yellow up to the shown 2.0×, red beyond). Terminal: two rows across the full width, with the same verdict | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
-| agents-pane | A side pane: running subagents as cards (task, type, model, tokens, run time, cost) and finished ones as compact rows, with totals. Costs are Claude Code's own estimate, the same as `/cost` | `/agents-pane` |
+| task-progress | Desktop app: row 1 shows the state and clock at the left, the goal of the current task in the middle (the task in progress, else a short Haiku summary of your prompt) with the tool that runs now in gray after it (cut with … when too long), and steps, tools and time left fixed at the right; row 2, right under it, is a thin shaded block bar (█ fill, ▓▒ edge, ░ track; a moving ░▒▓█▓▒░ glow while the estimate is still learning); after the turn the estimate shows ✓ (green, when the larger time is at most 1.25× the smaller), "N× slower" or "N× faster" (yellow up to the shown 2.0×, red beyond). Terminal: two rows across the full width, with the same verdict | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
+| agents-pane | A side pane: session totals (agents by status, tokens split into input, output, cache read and cache write, agent time, wall clock, cost), a cost-share bar and one row per agent type, then a card for every subagent, running and finished, colored by its type. The totals keep every agent, also after Claude Code drops it from its list. Costs are Claude Code's own estimate, the same as `/cost` | `/agents-pane` |
 | advisor-watch | Nothing until the advisor is used in the session. Then a toast for each call, with the caller's model, and a short `advisor ×N` in the status line | `/advisor-stats` (also the all-time count) |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
 | cache-tax | A row above the prompt before the prompt cache goes cold (5 min before for the 1-hour cache, 1 min before for the 5-minute cache), and a red row after | none |
@@ -16,6 +16,10 @@ Costs are estimates from Claude Code (the same as `/cost`), not a bill. On a sub
 
 1. If the turn has a task list (TaskCreate, TaskUpdate or TodoWrite) and at least 1 task is done in this turn: time per done task × tasks left. The band shows "(by tasks)".
 2. Otherwise, from history: of your past turns with a similar prompt size that ran longer than this turn so far, the median end time. The band shows "ETA learning n/5" until 5 turns are recorded, and "longer than usual" when this turn runs longer than all of them.
+
+### The goal line
+
+At the start of each turn with a prompt of 12 characters or more, the mod asks Haiku (low effort, one small call, about $0.001) for a 3 to 7 word goal (one small call per turn, billed like any other Haiku request and counted in `/cost`). Your prompt text goes only into that call. The answer is kept in the session's state, not in the turn history. A shorter prompt ("yes", "go on") keeps the goal of the turn before. When a task is in progress (TaskUpdate or TodoWrite), its name shows instead.
 
 At the end of each turn that ends with an answer, the mod records the turn (time, steps, tool calls and prompt length, not the prompt text) and the error of its first estimate. It keeps the last 300 turns in the plugin store on that computer. `/progress-stats` shows the median error of the last 20 turns against the 20 turns before them.
 
