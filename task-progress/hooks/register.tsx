@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
+import { SPIN, bar, blockCount, fit, litBlocks, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -291,37 +291,28 @@ export const register: Register = on => {
 
     // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
     // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
-    // Row 2, after a small gap: a segmented bar (▰ filled, ▱ empty), filled as a share of the row.
+    // Row 2, after a small gap: whole square blocks spread across the row, so no block is ever cut.
     if (e.surface !== 'terminal') {
-      // Segmented blocks: filled ▰ and empty ▱, half a line high, clipped to the row.
-      const FILLED = '▰'.repeat(240)
-      const EMPTY = '▱'.repeat(240)
       const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
-      const share = (x: number) => `${Math.round(Math.min(1, Math.max(0, x)) * 100)}%`
-      const eta = p.isRunning
-        ? tail.trim() + (pct ? ` (${pct.trim()})` : '')
-        : p.predictedMs !== null && p.outcome === 'Done'
-          ? `est ${duration(p.predictedMs)} · off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%`
-          : ''
-      const metrics = [counts, eta].filter(Boolean).join(' · ')
-      const at = (Math.floor(elapsedMs / 1000) * 10) % 80
-      const seg = (key: string, width: string | null, color: string | null) => (
-        <Box key={key} {...(width === null ? { flexGrow: 1, flexShrink: 1 } : { width, flexShrink: 0 })} minWidth={0} overflow="hidden">
-          {color === null ? (
-            <Text dimColor wrap="clip" maxLines={1}>
-              {EMPTY}
-            </Text>
-          ) : (
-            <Text color={color} wrap="clip" maxLines={1}>
-              {FILLED}
-            </Text>
-          )}
-        </Box>
+      const n = blockCount(width)
+      const lit = litBlocks(n, frac, Math.floor(elapsedMs / 1000))
+      const t = (key: string, text: string, props: Record<string, string | boolean>) => (
+        <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
+          {text}
+        </Text>
       )
-      const parts =
-        frac === null
-          ? [seg('before', `${at}%`, null), seg('fill', '20%', fillColor), seg('after', null, null)]
-          : [seg('fill', share(frac), fillColor), seg('rest', null, null)]
+      // The metrics: counts in gray; then time left (blue) and percent (bold), or the estimate's verdict.
+      const right: ReturnType<typeof t>[] = [t('counts', counts, { dimColor: true })]
+      if (p.isRunning) {
+        right.push(t('sep', '  ·  ', { dimColor: true }))
+        right.push(t('eta', tail.trim(), { color: tailColor === 'gray' ? 'inactive' : tailColor === 'yellow' ? 'warning' : 'suggestion' }))
+        if (pct) right.push(t('pct', `  ${pct.trim()}`, { weight: 'bold' }))
+      } else if (p.predictedMs !== null && p.outcome === 'Done') {
+        const v = verdict(p.predictedMs, elapsedMs)
+        right.push(t('sep', '  ·  ', { dimColor: true }))
+        right.push(t('est', `est ${duration(p.predictedMs)} `, { dimColor: true }))
+        right.push(t('verdict', v.text, { color: v.color, weight: 'bold' }))
+      }
       return (
         <Box flexDirection="column" rowGap="xs">
           <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
@@ -335,14 +326,22 @@ export const register: Register = on => {
                 {current.trim()}
               </Text>
             </Box>
-            <Box flexShrink={0}>
-              <Text dimColor tabular wrap="clip" maxLines={1}>
-                {metrics}
-              </Text>
+            <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0}>
+              {right}
             </Box>
           </Box>
-          <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden">
-            {parts}
+          <Box key="bar" flexDirection="row" flexWrap="nowrap" justifyContent="space-between">
+            {lit.map((isLit, i) =>
+              isLit ? (
+                <Text key={`b${i}`} color={fillColor} wrap="clip">
+                  ■
+                </Text>
+              ) : (
+                <Text key={`b${i}`} color="inactive" wrap="clip">
+                  ■
+                </Text>
+              ),
+            )}
           </Box>
         </Box>
       )

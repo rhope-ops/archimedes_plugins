@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bar, cells, fit, row1, row2, sweep } from '../hooks/view'
+import { bar, blockCount, cells, fit, litBlocks, row1, row2, sweep, verdict } from '../hooks/view'
 
 test('the bar fills in eighth steps and keeps its width', async () => {
   expect(bar(10, 0)).toEqual({ fill: '', empty: '░░░░░░░░░░' })
@@ -146,15 +146,29 @@ test('desktop: metrics fixed at the right, tool text cut first, bar on its own r
   expect(all).toContain('Bash: Run the test suite')
   // The clock keeps its place: fixed-width digits.
   expect((await ui.find({ type: 'Text', text: /0:47/ }))?.props?.tabular).toBe(true)
-  // The metrics sit at the right on one line and are never cut; the tool text is cut first.
-  const metrics = await ui.find({ type: 'Text', text: /steps · .* tools/ })
-  expect(metrics?.text).toContain('ETA learning 0/5')
-  expect(metrics?.props?.wrap).toBe('clip')
-  expect(metrics?.props?.tabular).toBe(true)
+  // The metrics sit at the right: one row of texts that never wrap; the tool text is cut first.
+  const metrics = await ui.find({ key: 'metrics' })
+  expect(metrics?.props?.flexShrink).toBe(0)
+  expect((await ui.find({ type: 'Text', text: /steps · .* tools/ }))?.props?.wrap).toBe('clip')
+  expect((await ui.find({ type: 'Text', text: /ETA learning 0\/5/ }))?.props?.wrap).toBe('clip')
   const tool = await ui.findAll({ type: 'Text', text: /Run the test suite/ })
   expect(tool.map(t => t.props?.maxLines)).toContain(1)
-  // The bar is its own row, drawn with a line glyph.
-  expect(await ui.find({ key: 'bar' })).toBeDefined()
-  expect((await ui.find({ key: 'fill' }))?.props?.width).toBe('20%')
+  // The bar: whole square blocks only, one per 2 columns.
+  const blocks = await ui.findAll({ type: 'Text', text: /^■$/ })
+  expect(blocks.length).toBe(60)
   await ui.unmount()
+})
+
+test('bar blocks and the estimate verdict', async () => {
+  expect(blockCount(30)).toBe(15)
+  expect(blockCount(500)).toBe(60)
+  expect(blockCount(10)).toBe(12)
+  expect(litBlocks(10, 0.5, 0).filter(Boolean).length).toBe(5)
+  expect(litBlocks(10, 1, 0).every(Boolean)).toBe(true)
+  const moving = litBlocks(10, null, 3)
+  expect(moving.filter(Boolean).length).toBe(4)
+  expect(moving[3]).toBe(true)
+  expect(verdict(95_000, 8_000)).toEqual({ text: '12× faster', color: 'error' })
+  expect(verdict(60_000, 100_000)).toEqual({ text: '1.7× slower', color: 'warning' })
+  expect(verdict(60_000, 70_000)).toEqual({ text: '✓', color: 'success' })
 })
