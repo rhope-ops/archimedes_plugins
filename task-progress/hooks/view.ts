@@ -106,3 +106,28 @@ export function row2(width: number, current: string, counts: string): { left: st
   const space = ' '.repeat(Math.max(0, w - cells(left) - cells(right)))
   return { left, space, right }
 }
+
+// How many whole blocks the desktop bar draws: about one per 2 columns, 12 to 60.
+export function blockCount(columns: number): number {
+  return Math.max(12, Math.min(60, Math.round(columns / 2)))
+}
+
+// Which blocks are lit: the first `frac` share, or a moving window of 4 while there is no estimate.
+export function litBlocks(n: number, frac: number | null, tick: number): boolean[] {
+  if (frac === null) {
+    const at = ((tick % n) + n) % n
+    return Array.from({ length: n }, (_, i) => (i - at + n) % n < 4)
+  }
+  const k = Math.round(Math.min(1, Math.max(0, frac)) * n)
+  return Array.from({ length: n }, (_, i) => i < k)
+}
+
+// The verdict on a finished turn's first estimate: on target, slower or faster, with a color.
+export function verdict(predictedMs: number, actualMs: number): { text: string; color: string } {
+  const p = Math.max(1000, predictedMs)
+  const a = Math.max(1000, actualMs)
+  if (Math.abs(p - a) / a <= 0.25) return { text: '✓', color: 'success' }
+  const ratio = a > p ? a / p : p / a
+  const times = ratio < 10 ? ratio.toFixed(1) : String(Math.round(ratio))
+  return { text: `${times}× ${a > p ? 'slower' : 'faster'}`, color: ratio <= 2 ? 'warning' : 'error' }
+}

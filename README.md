@@ -4,13 +4,13 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | Desktop app: one row, the clock (fixed-width digits) at the left and a progress bar whose label shows the tool that runs now, steps, tool calls, task X of Y and subagents, and whose value shows percent and time left. Terminal: two rows across the full width | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
-| agents-pane | A side pane with each subagent: task, type, model, tokens, estimated cost | `/agents-pane` |
+| task-progress | Desktop app: row 1 shows the state and clock at the left, the tool or file that runs now in the middle (cut with … when too long), and steps, tools and time left fixed at the right; row 2 is a bar of whole square blocks; the estimate shows ✓ (green), "N× slower" or "N× faster" (yellow up to 2×, red beyond). Terminal: two rows across the full width | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
+| agents-pane | A side pane: running subagents as cards (task, type, model, tokens, run time, cost) and finished ones as compact rows, with totals. Costs are Claude Code's own estimate, the same as `/cost` | `/agents-pane` |
 | advisor-watch | Nothing until the advisor is used in the session. Then a toast for each call, with the caller's model, and a short `advisor ×N` in the status line | `/advisor-stats` (also the all-time count) |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
 | cache-tax | A row above the prompt before the prompt cache goes cold (5 min before for the 1-hour cache, 1 min before for the 5-minute cache), and a red row after | none |
 
-Costs are estimates from Claude Code, not a bill.
+Costs are estimates from Claude Code (the same as `/cost`), not a bill. On a subscription plan they show what the same use would cost on the API; your real limit is the plan's usage limit. Prices: platform.claude.com/docs/en/about-claude/pricing.
 
 ## How task-progress estimates the time left
 

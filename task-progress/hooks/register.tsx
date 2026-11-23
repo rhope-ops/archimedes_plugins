@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
+import { SPIN, bar, blockCount, fit, litBlocks, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -289,23 +289,59 @@ export const register: Register = on => {
     const current = p.isRunning ? ` ${p.current}` : ''
     const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
 
-    // Desktop, VS Code and phones: one row. The clock at the left (fixed-width digits, so it
-    // does not shift), and the app's bar, whose own label line carries what runs now and the counts.
+    // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
+    // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
+    // Row 2, after a small gap: whole square blocks spread across the row, so no block is ever cut.
     if (e.surface !== 'terminal') {
-      const Progress = $.ui.resolve(e).Progress
-      const label = [fit(current.trim(), 60), counts].filter(Boolean).join('  ·  ')
-      const value = p.isRunning
-        ? [pct.trim(), tail.trim()].filter(Boolean).join(' · ')
-        : tail.trim() || (p.outcome === 'Done' ? '100%' : p.outcome)
+      const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
+      const n = blockCount(width)
+      const lit = litBlocks(n, frac, Math.floor(elapsedMs / 1000))
+      const t = (key: string, text: string, props: Record<string, string | boolean>) => (
+        <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
+          {text}
+        </Text>
+      )
+      // The metrics: counts in gray; then time left (blue) and percent (bold), or the estimate's verdict.
+      const right: ReturnType<typeof t>[] = [t('counts', counts, { dimColor: true })]
+      if (p.isRunning) {
+        right.push(t('sep', '  ·  ', { dimColor: true }))
+        right.push(t('eta', tail.trim(), { color: tailColor === 'gray' ? 'inactive' : tailColor === 'yellow' ? 'warning' : 'suggestion' }))
+        if (pct) right.push(t('pct', `  ${pct.trim()}`, { weight: 'bold' }))
+      } else if (p.predictedMs !== null && p.outcome === 'Done') {
+        const v = verdict(p.predictedMs, elapsedMs)
+        right.push(t('sep', '  ·  ', { dimColor: true }))
+        right.push(t('est', `est ${duration(p.predictedMs)} `, { dimColor: true }))
+        right.push(t('verdict', v.text, { color: v.color, weight: 'bold' }))
+      }
       return (
-        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
-          <Box flexShrink={0}>
-            <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
-              {head}
-            </Text>
+        <Box flexDirection="column" rowGap="xs">
+          <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
+            <Box flexShrink={0}>
+              <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
+                {head}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text wrap="end" maxLines={1}>
+                {current.trim()}
+              </Text>
+            </Box>
+            <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0}>
+              {right}
+            </Box>
           </Box>
-          <Box flexGrow={1} flexShrink={1} minWidth={0}>
-            <Progress label={label || 'Working'} value={frac ?? undefined} valueText={value} color={barColor} />
+          <Box key="bar" flexDirection="row" flexWrap="nowrap" justifyContent="space-between">
+            {lit.map((isLit, i) =>
+              isLit ? (
+                <Text key={`b${i}`} color={fillColor} wrap="clip">
+                  ■
+                </Text>
+              ) : (
+                <Text key={`b${i}`} color="inactive" wrap="clip">
+                  ■
+                </Text>
+              ),
+            )}
           </Box>
         </Box>
       )
