@@ -123,11 +123,13 @@ export function litBlocks(n: number, frac: number | null, tick: number): boolean
 }
 
 // The verdict on a finished turn's first estimate: on target, slower or faster, with a color.
+// Symmetric: ✓ when the larger time is at most 1.25× the smaller, in either direction.
+// The color comes from the shown (rounded) number, so "2.0×" is always yellow.
 export function verdict(predictedMs: number, actualMs: number): { text: string; color: string } {
   const p = Math.max(1000, predictedMs)
   const a = Math.max(1000, actualMs)
-  if (Math.abs(p - a) / a <= 0.25) return { text: '✓', color: 'success' }
-  const ratio = a > p ? a / p : p / a
+  const ratio = Math.max(p, a) / Math.min(p, a)
+  if (ratio <= 1.25) return { text: '✓', color: 'success' }
   const times = ratio < 10 ? ratio.toFixed(1) : String(Math.round(ratio))
-  return { text: `${times}× ${a > p ? 'slower' : 'faster'}`, color: ratio <= 2 ? 'warning' : 'error' }
+  return { text: `${times}× ${a > p ? 'slower' : 'faster'}`, color: Number(times) <= 2 ? 'warning' : 'error' }
 }

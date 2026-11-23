@@ -34,7 +34,7 @@ test('fit counts terminal cells and never cuts a character', async () => {
 test('rows 1 and 2 are exactly the width, also at 40 columns and below', async () => {
   const cases = [
     ['◐ 1:23', ' 45%', ' ~1m30s left (by tasks)', ' ~1m30s', ''],
-    ['● Done 1:23', '', ' estimate was 1m30s (off 8%)', ' off 8%', ''],
+    ['● Done 1:23', '', ' est 1m30s 2.0× slower', ' 2.0× slower', ''],
     ['◐ 1:02:03', ' 45%', ' ETA learning 3/5', ' 3/5', ' Edit: /a/very/long/path/to/a/file.ts'],
   ] as const
   for (const width of [20, 30, 40, 60, 100]) {
@@ -118,7 +118,9 @@ test('row 1 fills the width in each state', async ($, on) => {
 
   clockMs += 60_000
   await $.turn.complete({ turnId: 't6', ...END })
-  expect((await rows(100)).join('')).toContain('estimate was 1m30s (off 0%)')
+  const end = (await rows(100)).join('')
+  expect(end).toContain('est 1m30s ✓')
+  expect(end).not.toContain('off')
 })
 
 test('desktop: metrics fixed at the right, tool text cut first, bar on its own row', async ($, on) => {
@@ -156,7 +158,14 @@ test('desktop: metrics fixed at the right, tool text cut first, bar on its own r
   // The bar: whole square blocks only, one per 2 columns.
   const blocks = await ui.findAll({ type: 'Text', text: /^■$/ })
   expect(blocks.length).toBe(60)
+  expect((await ui.find({ key: 'bar' }))?.props?.overflow).toBe('hidden')
   await ui.unmount()
+
+  // Under 12 columns the bar still draws its minimum of 12 blocks: the row clips them at the edge.
+  const narrow = await $.ui.mount({ ...BAND(10, 3), surface: 'desktop' })
+  expect((await narrow.findAll({ type: 'Text', text: /^■$/ })).length).toBe(12)
+  expect((await narrow.find({ key: 'bar' }))?.props?.overflow).toBe('hidden')
+  await narrow.unmount()
 })
 
 test('bar blocks and the estimate verdict', async () => {
@@ -171,4 +180,19 @@ test('bar blocks and the estimate verdict', async () => {
   expect(verdict(95_000, 8_000)).toEqual({ text: '12× faster', color: 'error' })
   expect(verdict(60_000, 100_000)).toEqual({ text: '1.7× slower', color: 'warning' })
   expect(verdict(60_000, 70_000)).toEqual({ text: '✓', color: 'success' })
+})
+
+test('the ✓ band is symmetric: max / min ≤ 1.25 in either direction', async () => {
+  expect(verdict(80_000, 100_000)).toEqual({ text: '✓', color: 'success' })
+  expect(verdict(100_000, 80_000)).toEqual({ text: '✓', color: 'success' })
+  // 75 s against 100 s is 1.33× both ways: the same verdict in each direction.
+  expect(verdict(75_000, 100_000)).toEqual({ text: '1.3× slower', color: 'warning' })
+  expect(verdict(100_000, 75_000)).toEqual({ text: '1.3× faster', color: 'warning' })
+})
+
+test('the verdict color matches the shown, rounded number', async () => {
+  // 2.04× shows "2.0×", so it is yellow, not red.
+  expect(verdict(100_000, 204_000)).toEqual({ text: '2.0× slower', color: 'warning' })
+  expect(verdict(204_000, 100_000)).toEqual({ text: '2.0× faster', color: 'warning' })
+  expect(verdict(100_000, 210_000)).toEqual({ text: '2.1× slower', color: 'error' })
 })
