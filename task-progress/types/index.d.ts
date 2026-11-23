@@ -23,6 +23,8 @@ export type Progress = {
   // the prompt. Empty until known. Kept for this session only, never in the turn history.
   goal: string
   turnId: string
+  // True once a task tool call changed the list in this turn: only then does the task name the goal.
+  hasTaskChange: boolean
   outcome: string
   promptChars: number
   predictedMs: number | null

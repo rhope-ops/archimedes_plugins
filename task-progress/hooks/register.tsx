@@ -88,6 +88,7 @@ async function track($: EngineInterface, tool: string, args: Record<string, unkn
     return after ?? current
   })
   const c = change
+  if (c !== undefined) await patch($, p => (p.hasTaskChange ? p : { ...p, hasTaskChange: true }))
   if (c !== undefined && (c.added.length > 0 || c.removed.length > 0)) {
     await patch($, p => ({ ...p, completedInTurn: applyChange(p.completedInTurn, c) }))
   }
@@ -132,7 +133,7 @@ async function askGoal($: EngineInterface, turnId: string, text: string): Promis
   const timer = await $.clock.after(10, async () => {
     try {
       const r = await $.model.complete(
-        { model: 'haiku', system: GOAL_SYSTEM, prompt: text.slice(0, 4000), maxTokens: 40, effort: 'low', timeoutMs: 15000 },
+        { model: 'haiku', system: GOAL_SYSTEM, prompt: text.slice(0, 4000), maxTokens: 200, effort: 'low', timeoutMs: 15000 },
         { signal: stop.signal },
       )
       const goal = r.isAnswered ? cleanGoal(r.text) : ''
@@ -203,6 +204,7 @@ export const register: Register = on => {
         // A short reply ("yes", "go on") keeps the goal it continues.
         goal: isShort ? (before?.goal ?? '') : '',
         turnId: e.turnId,
+        hasTaskChange: false,
         outcome: '',
         promptChars: e.text.length,
         predictedMs: first.kind === 'eta' ? first.leftMs : null,
@@ -281,7 +283,8 @@ export const register: Register = on => {
     const taskList = await read($, tasks)
     const plan = planOf(taskList, p.completedInTurn)
     // What the turn is for: the task in progress, else the model's summary of the prompt.
-    const goal = activeTitle(taskList) || p.goal
+    // A task left in progress by an earlier turn does not hide this turn's goal.
+    const goal = (p.hasTaskChange ? activeTitle(taskList) : '') || p.goal
     const doing = p.isRunning ? p.current : ''
     // Read live, so background subagents from an earlier turn count too.
     const subagents = p.isRunning

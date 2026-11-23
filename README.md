@@ -19,7 +19,7 @@ Costs are estimates from Claude Code (the same as `/cost`), not a bill. On a sub
 
 ### The goal line
 
-At the start of each turn with a prompt of 12 characters or more, the mod asks Haiku (low effort, one small call, about $0.001) for a 3 to 7 word goal. Your prompt text goes only into that call. The answer stays in the session's state; it is not written to disk. A shorter prompt ("yes", "go on") keeps the goal of the turn before. When a task is in progress (TaskUpdate or TodoWrite), its name shows instead.
+At the start of each turn with a prompt of 12 characters or more, the mod asks Haiku (low effort, one small call, about $0.001) for a 3 to 7 word goal (one small call per turn, billed like any other Haiku request and counted in `/cost`). Your prompt text goes only into that call. The answer is kept in the session's state, not in the turn history. A shorter prompt ("yes", "go on") keeps the goal of the turn before. When a task is in progress (TaskUpdate or TodoWrite), its name shows instead.
 
 At the end of each turn that ends with an answer, the mod records the turn (time, steps, tool calls and prompt length, not the prompt text) and the error of its first estimate. It keeps the last 300 turns in the plugin store on that computer. `/progress-stats` shows the median error of the last 20 turns against the 20 turns before them.
 

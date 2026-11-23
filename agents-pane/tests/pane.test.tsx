@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { sync, tokensText, typeColor } from '../hooks/pricing'
+import { splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -159,4 +159,25 @@ test('helpers: token rounding', async () => {
   expect(tokensText(999_950)).toBe('1.0M')
   expect(tokensText(99_960)).toBe('100k')
   expect(tokensText(1_500)).toBe('1.5k')
+})
+
+test('a running agent that leaves the list ends; the terminal share bar is exactly the width', async ($, on) => {
+  const now = Date.now()
+  let list = [agent('a1', 'running', 0.5, now - 5000, 'Explore'), agent('a2', 'running', 1.5, now - 5000)]
+  await setup($, on, () => list)
+  await poke($)
+  list = []
+  await poke($)
+  const texts = await paneTexts($, 'terminal')
+  expect(texts.join('\n')).toContain('2 done')
+  expect(texts.join('\n')).not.toContain('running')
+  // bodyColumns 50, padding 1 each side: 48 cells, split 1 : 3 by cost.
+  const bar = texts.filter(t => /^█+$/.test(t))
+  expect(bar.map(t => t.length)).toEqual([12, 36])
+})
+
+test('splitCells: exact width, at least one cell per part with a share', async () => {
+  expect(splitCells(10, [1, 1, 1])).toEqual([4, 3, 3])
+  expect(splitCells(10, [100, 0.01])).toEqual([9, 1])
+  expect(splitCells(5, [0, 0])).toEqual([0, 0])
 })

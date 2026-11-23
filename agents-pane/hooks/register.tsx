@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, Ledger } from '../types'
-import { since, snapOf, sync, tokensText, typeColor, usdText } from './pricing'
+import { since, snapOf, splitCells, sync, tokensText, typeColor, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
@@ -20,6 +20,8 @@ const STATUS: Record<string, { icon: string; color: string; word: string }> = {
   completed: { icon: '✓', color: 'success', word: 'done' },
   failed: { icon: '✕', color: 'error', word: 'failed' },
   killed: { icon: '■', color: 'inactive', word: 'stopped' },
+  // Left Claude Code's list while it ran, with no last reading.
+  ended: { icon: '✓', color: 'inactive', word: 'ended' },
 }
 const LIVE = ['running', 'waiting', 'pending']
 
@@ -128,7 +130,7 @@ export const register: Register = on => {
     const statusLine = [
       ...(count('running') ? [`${count('running')} running`] : []),
       ...(count('waiting') + count('pending') ? [`${count('waiting') + count('pending')} waiting`] : []),
-      `${count('completed')} done`,
+      `${count('completed') + count('ended')} done`,
       ...(count('failed') ? [`${count('failed')} failed`] : []),
       ...(count('killed') + count('idle') ? [`${count('killed') + count('idle')} stopped`] : []),
     ].join(' · ')
@@ -244,6 +246,16 @@ export const register: Register = on => {
         </Box>
 
         <Box flexDirection="column" paddingX={1} rowGap={0}>
+          {isTerminal ? (
+            // Terminal: whole cells, laid out to the pane's width.
+            <Box key="share" flexDirection="row" flexWrap="nowrap">
+              {splitCells(Math.max(0, (e.props.bodyColumns ?? 40) - 2), byType.map(shareOf)).map((n, i) => (
+                <Text key={byType[i]?.type ?? String(i)} color={colorOf(byType[i]?.type ?? '')} wrap="clip">
+                  {'█'.repeat(n)}
+                </Text>
+              ))}
+            </Box>
+          ) : (
           <Box key="share" flexDirection="row" flexWrap="nowrap" overflow="hidden">
             {byType.map((g, i) => (
               <Box
@@ -260,6 +272,7 @@ export const register: Register = on => {
               </Box>
             ))}
           </Box>
+          )}
           {byType.map(g => (
             <Box key={`t-${g.type}`} flexDirection="row" flexWrap="nowrap" columnGap={1}>
               <Text color={colorOf(g.type)}>■</Text>

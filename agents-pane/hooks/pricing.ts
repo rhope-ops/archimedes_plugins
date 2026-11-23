@@ -99,8 +99,46 @@ export function sync(before: Ledger, live: readonly AgentSnap[], now: number): L
       changed = true
     }
   }
+  // A live agent that left the list without a last reading has ended: stop its clock.
+  const seen = new Set(live.map(s => s.id))
+  for (const id of order) {
+    const old = agents[id]
+    if (old && !seen.has(id) && !ENDED.includes(old.status) && old.status !== 'ended') {
+      agents[id] = { ...old, status: 'ended', endTime: now }
+      changed = true
+    }
+  }
   if (types.length !== before.types.length || order.length !== before.order.length) changed = true
   return changed ? { types, order, agents } : before
+}
+
+// Cells of each part of a `width`-cell bar split by `shares` (any scale): every part with a share
+// gets at least 1 cell when it fits, and the cells add up to exactly `width`.
+export function splitCells(width: number, shares: readonly number[]): number[] {
+  const w = Math.max(0, Math.floor(width))
+  const total = shares.reduce((n, x) => n + Math.max(0, x), 0)
+  if (w === 0 || total <= 0) return shares.map(() => 0)
+  const raw = shares.map(x => (Math.max(0, x) / total) * w)
+  const cells = raw.map(x => Math.floor(x))
+  // Largest remainders take the cells left over.
+  const order = raw.map((x, i) => [x - Math.floor(x), i] as const).sort((a, b) => b[0] - a[0])
+  let left = w - cells.reduce((n, x) => n + x, 0)
+  for (const [, i] of order) {
+    if (left <= 0) break
+    cells[i] = (cells[i] ?? 0) + 1
+    left--
+  }
+  // A part with a share but no cell borrows one from the largest part.
+  for (let i = 0; i < cells.length; i++) {
+    if ((shares[i] ?? 0) > 0 && cells[i] === 0) {
+      const big = cells.indexOf(Math.max(...cells))
+      if ((cells[big] ?? 0) > 1) {
+        cells[big] = (cells[big] ?? 0) - 1
+        cells[i] = 1
+      }
+    }
+  }
+  return cells
 }
 
 // One color per agent type, in the order the types first appear. The 8 hues of the dataviz
