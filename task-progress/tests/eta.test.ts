@@ -53,5 +53,7 @@ test('stats compare the last 20 errors with the 20 before', async () => {
   expect(relError(50_000, 100_000)).toBe(0.5)
   expect(duration(45_000)).toBe('45s')
   expect(duration(240_000)).toBe('4m')
+  expect(duration(90_000)).toBe('1m30s')
+  expect(duration(725_000)).toBe('12m')
   expect(duration(5_400_000)).toBe('1h30')
 })

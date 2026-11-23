@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
+import { SPIN, bar, fit, gap, sweep } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -229,52 +230,100 @@ export const register: Register = on => {
     if (p === null || e.props.hasSurvey || (await read($, isHidden))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
+    const width = Math.max(40, e.props.bodyColumns ?? 80)
+    const isTwoRows = (e.props.maxRows ?? 2) >= 2
     const t = p.isRunning ? await read($, now) : p.endedAt
-    const elapsedMs = t - p.startedAt
-    const counts = `${p.steps} steps · ${p.tools} tools`
+    const elapsedMs = Math.max(0, t - p.startedAt)
+    const plan = planOf(await read($, tasks), p.completedInTurn)
+    // Read live, so background subagents from an earlier turn count too.
+    const subagents = p.isRunning
+      ? (await $.agent.list()).filter(a => a.kind === 'local_agent' && a.status === 'running').length
+      : 0
+    const counts = [
+      `${p.steps} steps`,
+      `${p.tools} tools`,
+      ...(plan.total > 0 ? [`task ${Math.min(plan.done + (p.isRunning ? 1 : 0), plan.total)} of ${plan.total}`] : []),
+      ...(subagents > 0 ? [`${subagents} subagents`] : []),
+    ].join(' · ')
 
+    // Row 1: state and clock, a bar across the width, then the estimate.
+    let head: string
+    let headColor: string
+    let tail: string
+    let tailColor: string
+    let frac: number | null
     if (!p.isRunning) {
-      const guess =
-        p.predictedMs !== null && p.outcome === 'Done'
-          ? ` · estimate was ${duration(p.predictedMs)} (off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%)`
+      const isDone = p.outcome === 'Done'
+      head = `● ${p.outcome} ${clock(elapsedMs)}`
+      headColor = isDone ? 'green' : 'yellow'
+      tail =
+        p.predictedMs !== null && isDone
+          ? ` estimate was ${duration(p.predictedMs)} (off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%)`
           : ''
-      return (
+      tailColor = 'gray'
+      frac = 1
+    } else {
+      const est = estimate(history, p.promptChars, elapsedMs, plan)
+      head = `${SPIN[Math.floor(elapsedMs / 1000) % SPIN.length]} ${clock(elapsedMs)}`
+      headColor = 'cyan'
+      if (est.kind === 'eta') {
+        frac = elapsedMs / Math.max(1, elapsedMs + est.leftMs)
+        tail = ` ~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
+        tailColor = 'cyan'
+      } else if (est.kind === 'over') {
+        frac = 1
+        tail = ' longer than usual'
+        tailColor = 'yellow'
+      } else {
+        frac = null
+        tail = ` ETA learning ${est.samples}/${MIN_SAMPLES}`
+        tailColor = 'gray'
+      }
+    }
+    const pct = p.isRunning && frac !== null && frac < 1 ? ` ${Math.round(frac * 100)}%` : ''
+    const current = p.isRunning ? ` ${p.current}` : ''
+    // One row only: the tool name goes after the estimate and the bar gets shorter.
+    const inline = isTwoRows ? '' : fit(current, Math.floor(width / 3))
+    const barWidth = Math.max(8, width - head.length - pct.length - tail.length - inline.length - 1)
+    const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
+    const filled = frac === null ? null : bar(barWidth, frac)
+    const moving = frac === null ? sweep(barWidth, Math.floor(elapsedMs / 1000)) : null
+
+    const row1 = (
+      <Box>
+        <Text color={headColor} bold>
+          {head}{' '}
+        </Text>
+        {filled !== null ? (
+          <Text color={barColor}>{filled.fill}</Text>
+        ) : (
+          <Text dimColor>{moving?.before ?? ''}</Text>
+        )}
+        {filled !== null ? (
+          <Text dimColor>{filled.empty}</Text>
+        ) : (
+          <Text color="cyan">{moving?.glow ?? ''}</Text>
+        )}
+        {moving !== null && <Text dimColor>{moving.after}</Text>}
+        {pct !== '' && <Text bold>{pct}</Text>}
+        <Text color={tailColor}>{tail}</Text>
+        {inline !== '' && <Text>{inline}</Text>}
+      </Box>
+    )
+    if (!isTwoRows) return row1
+
+    // Row 2: what Claude does now on the left, the counts on the right.
+    const left = fit(current, Math.max(10, width - counts.length - 4))
+    return (
+      <Box flexDirection="column">
+        {row1}
         <Box>
-          <Text color={p.outcome === 'Done' ? 'green' : 'yellow'}>● {p.outcome}</Text>
+          <Text>{left}</Text>
           <Text dimColor>
-            {' '}
-            {clock(elapsedMs)} · {counts}
-            {guess}
+            {gap(left.length, counts.length, width)}
+            {counts}
           </Text>
         </Box>
-      )
-    }
-
-    const plan = planOf(await read($, tasks), p.completedInTurn)
-    const est = estimate(history, p.promptChars, elapsedMs, plan)
-    const eta =
-      est.kind === 'eta'
-        ? `~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
-        : est.kind === 'over'
-          ? 'longer than usual'
-          : `ETA learning ${est.samples}/${MIN_SAMPLES}`
-    const step = plan.total > 0 ? ` · task ${Math.min(plan.done + 1, plan.total)} of ${plan.total}` : ''
-    // Read live, so background subagents from an earlier turn count too.
-    const subagents = (await $.agent.list()).filter(
-      a => a.kind === 'local_agent' && a.status === 'running',
-    ).length
-
-    return (
-      <Box>
-        <Text color="cyan">◐ {clock(elapsedMs)}</Text>
-        <Text color={est.kind === 'over' ? 'yellow' : 'cyan'}> {eta}</Text>
-        <Text> {p.current}</Text>
-        <Text dimColor>
-          {' '}
-          · {counts}
-          {step}
-          {subagents > 0 ? ` · ${subagents} subagents running` : ''}
-        </Text>
       </Box>
     )
   })

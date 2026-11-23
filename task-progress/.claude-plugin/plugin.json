@@ -1,1 +1,1 @@
-{ "name": "task-progress", "version": "0.2.0", "description": "Band above the prompt: what Claude does now, elapsed time, steps, tool calls and running subagents", "types": "./types/index.d.ts" }
+{ "name": "task-progress", "version": "0.3.0", "description": "Band above the prompt: what Claude does now, elapsed time, steps, tool calls and running subagents", "types": "./types/index.d.ts" }

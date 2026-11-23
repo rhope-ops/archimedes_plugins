@@ -123,7 +123,7 @@ test('a task list drives the ETA', async ($, on) => {
   await $.tool.call(set('1', 'completed'))
   // 30 s for 1 task, 3 tasks left: 90 s.
   const b = await band($)
-  expect(b.eta).toBe(' ~2m left (by tasks)')
+  expect(b.eta).toBe(' ~1m30s left (by tasks)')
   expect(b.step).toContain('task 2 of 4')
 })
 

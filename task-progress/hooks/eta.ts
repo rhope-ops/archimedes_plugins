@@ -79,6 +79,8 @@ export function stats(history: readonly TurnRecord[]): Stats {
 export function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s}s`
+  // Under 10 minutes the seconds matter: 1m30s, not 2m.
+  if (s < 600) return s % 60 === 0 ? `${s / 60}m` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
   const m = Math.round(s / 60)
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
 }

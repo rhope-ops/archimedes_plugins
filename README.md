@@ -4,7 +4,7 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | A row above the prompt: elapsed time, estimated time left, the tool that runs now, steps, tool calls, task X of Y, running subagents | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
+| task-progress | Two rows above the prompt, across the full width. Row 1: elapsed time, a progress bar, percent done and estimated time left. Row 2: the tool that runs now, with steps, tool calls, task X of Y and running subagents at the right | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
 | agents-pane | A side pane with each subagent: task, type, model, tokens, estimated cost | `/agents-pane` |
 | advisor-watch | A toast each time the advisor is consulted, with the caller's model; counts in the status line | `/advisor-stats` |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
