@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
+import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -293,8 +293,10 @@ export const register: Register = on => {
     // does not shift), and the app's bar, whose own label line carries what runs now and the counts.
     if (e.surface !== 'terminal') {
       const Progress = $.ui.resolve(e).Progress
-      const label = [current.trim(), counts].filter(Boolean).join('  ·  ')
-      const value = p.isRunning ? [pct.trim(), tail.trim()].filter(Boolean).join(' · ') : tail.trim() || '100%'
+      const label = [fit(current.trim(), 60), counts].filter(Boolean).join('  ·  ')
+      const value = p.isRunning
+        ? [pct.trim(), tail.trim()].filter(Boolean).join(' · ')
+        : tail.trim() || (p.outcome === 'Done' ? '100%' : p.outcome)
       return (
         <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
           <Box flexShrink={0}>
