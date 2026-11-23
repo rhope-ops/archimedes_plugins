@@ -289,23 +289,58 @@ export const register: Register = on => {
     const current = p.isRunning ? ` ${p.current}` : ''
     const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
 
-    // Desktop, VS Code and phones: one row. The clock at the left (fixed-width digits, so it
-    // does not shift), and the app's bar, whose own label line carries what runs now and the counts.
+    // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
+    // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
+    // Row 2, after a small gap: a thin bar drawn with line glyphs, filled as a share of the row.
     if (e.surface !== 'terminal') {
-      const Progress = $.ui.resolve(e).Progress
-      const label = [fit(current.trim(), 60), counts].filter(Boolean).join('  ·  ')
-      const value = p.isRunning
-        ? [pct.trim(), tail.trim()].filter(Boolean).join(' · ')
-        : tail.trim() || (p.outcome === 'Done' ? '100%' : p.outcome)
-      return (
-        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
-          <Box flexShrink={0}>
-            <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
-              {head}
+      const LINE = '━'.repeat(400)
+      const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
+      const share = (x: number) => `${Math.round(Math.min(1, Math.max(0, x)) * 100)}%`
+      const eta = p.isRunning
+        ? tail.trim() + (pct ? ` (${pct.trim()})` : '')
+        : p.predictedMs !== null && p.outcome === 'Done'
+          ? `est ${duration(p.predictedMs)} · off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%`
+          : p.outcome
+      const metrics = [counts, eta].filter(Boolean).join(' · ')
+      const at = (Math.floor(elapsedMs / 1000) * 10) % 80
+      const seg = (key: string, width: string | null, color: string | null) => (
+        <Box key={key} {...(width === null ? { flexGrow: 1, flexShrink: 1 } : { width, flexShrink: 0 })} minWidth={0} overflow="hidden">
+          {color === null ? (
+            <Text dimColor wrap="clip" maxLines={1}>
+              {LINE}
             </Text>
+          ) : (
+            <Text color={color} wrap="clip" maxLines={1}>
+              {LINE}
+            </Text>
+          )}
+        </Box>
+      )
+      const parts =
+        frac === null
+          ? [seg('before', `${at}%`, null), seg('fill', '20%', fillColor), seg('after', null, null)]
+          : [seg('fill', share(frac), fillColor), seg('rest', null, null)]
+      return (
+        <Box flexDirection="column" rowGap="xs">
+          <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
+            <Box flexShrink={0}>
+              <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
+                {head}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text wrap="end" maxLines={1}>
+                {current.trim()}
+              </Text>
+            </Box>
+            <Box flexShrink={0}>
+              <Text dimColor tabular wrap="clip" maxLines={1}>
+                {metrics}
+              </Text>
+            </Box>
           </Box>
-          <Box flexGrow={1} flexShrink={1} minWidth={0}>
-            <Progress label={label || 'Working'} value={frac ?? undefined} valueText={value} color={barColor} />
+          <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden">
+            {parts}
           </Box>
         </Box>
       )

@@ -121,7 +121,7 @@ test('row 1 fills the width in each state', async ($, on) => {
   expect((await rows(100)).join('')).toContain('estimate was 1m30s (off 0%)')
 })
 
-test('desktop: one row, the bar label carries the tool, the clock has fixed-width digits', async ($, on) => {
+test('desktop: metrics fixed at the right, tool text cut first, bar on its own row', async ($, on) => {
   let clockMs = 0
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -146,5 +146,15 @@ test('desktop: one row, the bar label carries the tool, the clock has fixed-widt
   expect(all).toContain('Bash: Run the test suite')
   // The clock keeps its place: fixed-width digits.
   expect((await ui.find({ type: 'Text', text: /0:47/ }))?.props?.tabular).toBe(true)
+  // The metrics sit at the right on one line and are never cut; the tool text is cut first.
+  const metrics = await ui.find({ type: 'Text', text: /steps · .* tools/ })
+  expect(metrics?.text).toContain('ETA learning 0/5')
+  expect(metrics?.props?.wrap).toBe('clip')
+  expect(metrics?.props?.tabular).toBe(true)
+  const tool = await ui.findAll({ type: 'Text', text: /Run the test suite/ })
+  expect(tool.map(t => t.props?.maxLines)).toContain(1)
+  // The bar is its own row, drawn with a line glyph.
+  expect(await ui.find({ key: 'bar' })).toBeDefined()
+  expect((await ui.find({ key: 'fill' }))?.props?.width).toBe('20%')
   await ui.unmount()
 })
