@@ -121,7 +121,7 @@ test('row 1 fills the width in each state', async ($, on) => {
   expect((await rows(100)).join('')).toContain('estimate was 1m30s (off 0%)')
 })
 
-test('desktop: a native bar that grows, and one-line texts', async ($, on) => {
+test('desktop: one row, the bar label carries the tool, the clock has fixed-width digits', async ($, on) => {
   let clockMs = 0
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -141,7 +141,10 @@ test('desktop: a native bar that grows, and one-line texts', async ($, on) => {
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
   // No text holds bar glyphs: the bar is the app's own element.
   expect(texts.some(t => /[█░▒▓]/.test(t))).toBe(false)
-  expect(texts).toContain('ETA learning 0/5')
-  expect(texts).toContain('Bash: Run the test suite')
+  const all = texts.join(' ')
+  expect(all).toContain('ETA learning 0/5')
+  expect(all).toContain('Bash: Run the test suite')
+  // The clock keeps its place: fixed-width digits.
+  expect((await ui.find({ type: 'Text', text: /0:47/ }))?.props?.tabular).toBe(true)
   await ui.unmount()
 })

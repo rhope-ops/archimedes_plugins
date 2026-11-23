@@ -9,8 +9,10 @@ async function total($: EngineInterface): Promise<number> {
   return typeof v === 'number' ? v : 0
 }
 
-async function show($: EngineInterface, session: number): Promise<void> {
-  $.ui.status(`advisor: ${session} this session · ${await total($)} total`)
+// Quiet until the advisor is used: no status entry before the first call of the session,
+// then one short entry. /advisor-stats gives the all-time count.
+function show($: EngineInterface, session: number): void {
+  $.ui.status(session > 0 ? `advisor ×${session}` : undefined)
 }
 
 export const register: Register = on => {
@@ -20,7 +22,7 @@ export const register: Register = on => {
       description: 'Show how often the advisor was consulted',
     })
     const result = await next(e)
-    await show($, await read($, sessionCount))
+    show($, await read($, sessionCount))
     return result
   })
 
@@ -42,7 +44,7 @@ export const register: Register = on => {
         const tier = /(fable|opus|sonnet|haiku)/i.exec(response.usage?.model ?? e.model)?.[1]?.toLowerCase() ?? e.model
         const who = e.agentId === undefined ? 'main' : 'subagent'
         $.ui.toast(`Advisor consulted by ${tier} (${who}) · #${session} this session`)
-        await show($, session)
+        show($, session)
       }
     } catch {}
     return response

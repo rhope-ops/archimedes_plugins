@@ -4,9 +4,9 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | Two rows above the prompt, across the full width. Row 1: elapsed time, a progress bar, percent done and estimated time left. Row 2: the tool that runs now, with steps, tool calls, task X of Y and running subagents at the right | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
+| task-progress | Desktop app: one row, the clock (fixed-width digits) at the left and a progress bar whose label shows the tool that runs now, steps, tool calls, task X of Y and subagents, and whose value shows percent and time left. Terminal: two rows across the full width | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
 | agents-pane | A side pane with each subagent: task, type, model, tokens, estimated cost | `/agents-pane` |
-| advisor-watch | A toast each time the advisor is consulted, with the caller's model; counts in the status line | `/advisor-stats` |
+| advisor-watch | Nothing until the advisor is used in the session. Then a toast for each call, with the caller's model, and a short `advisor ×N` in the status line | `/advisor-stats` (also the all-time count) |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
 | cache-tax | A row above the prompt before the prompt cache goes cold (5 min before for the 1-hour cache, 1 min before for the 5-minute cache), and a red row after | none |
 

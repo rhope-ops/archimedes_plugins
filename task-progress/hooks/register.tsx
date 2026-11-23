@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
+import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -289,57 +289,23 @@ export const register: Register = on => {
     const current = p.isRunning ? ` ${p.current}` : ''
     const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
 
-    // Desktop, VS Code and phones: proportional fonts, so the app lays the row out.
-    // A native bar grows into the free room; each text stays on one line.
+    // Desktop, VS Code and phones: one row. The clock at the left (fixed-width digits, so it
+    // does not shift), and the app's bar, whose own label line carries what runs now and the counts.
     if (e.surface !== 'terminal') {
       const Progress = $.ui.resolve(e).Progress
-      const drow1 = (
-        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={1}>
+      const label = [fit(current.trim(), 60), counts].filter(Boolean).join('  ·  ')
+      const value = p.isRunning
+        ? [pct.trim(), tail.trim()].filter(Boolean).join(' · ')
+        : tail.trim() || (p.outcome === 'Done' ? '100%' : p.outcome)
+      return (
+        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
           <Box flexShrink={0}>
-            <Text color={headColor} weight="bold" wrap="clip">
+            <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
               {head}
             </Text>
           </Box>
           <Box flexGrow={1} flexShrink={1} minWidth={0}>
-            {Progress !== undefined ? (
-              <Progress label="Turn progress" value={frac ?? undefined} valueText={pct.trim() || undefined} color={barColor} />
-            ) : (
-              <Text color={barColor} wrap="clip">
-                {'█'.repeat(20)}
-              </Text>
-            )}
-          </Box>
-          {pct !== '' && (
-            <Box flexShrink={0}>
-              <Text weight="bold" wrap="clip">
-                {pct.trim()}
-              </Text>
-            </Box>
-          )}
-          {tail !== '' && (
-            <Box flexShrink={1} minWidth={0}>
-              <Text color={tailColor} wrap="end" maxLines={1}>
-                {tail.trim()}
-              </Text>
-            </Box>
-          )}
-        </Box>
-      )
-      if (!isTwoRows) return drow1
-      return (
-        <Box flexDirection="column">
-          {drow1}
-          <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={2}>
-            <Box flexShrink={1} minWidth={0}>
-              <Text wrap="end" maxLines={1}>
-                {current.trim()}
-              </Text>
-            </Box>
-            <Box flexShrink={0}>
-              <Text dimColor wrap="clip">
-                {counts}
-              </Text>
-            </Box>
+            <Progress label={label || 'Working'} value={frac ?? undefined} valueText={value} color={barColor} />
           </Box>
         </Box>
       )
