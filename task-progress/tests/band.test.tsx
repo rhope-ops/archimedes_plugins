@@ -35,10 +35,19 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   // First turn: no history yet.
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...BAND, surface })
+  {
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect((await ui.find({ type: 'Text', text: /Run tests/ }))?.text?.trim()).toBe('Bash: Run tests')
     expect((await ui.find({ type: 'Text', text: /learning/ }))?.text?.trim()).toBe('ETA learning 0/5')
+    await ui.unmount()
+  }
+  {
+    // Desktop: one row; the bar's label carries the tool and the counts, its value the estimate.
+    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join(' ')
+    expect(all).toContain('Bash: Run tests')
+    expect(all).toContain('0 steps · 1 tools')
+    expect(all).toContain('ETA learning 0/5')
     await ui.unmount()
   }
   clockMs = 60_000
@@ -57,14 +66,14 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   clockMs += 1000
   await $.turn.start({ text: 'go', turnId: 't6' })
   clockMs += 20_000
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /left/ }))?.text?.trim()).toBe('~40s left')
   await ui.unmount()
 
   // At the end the band compares the first estimate with the real time.
   clockMs += 40_000
   await $.turn.complete({ turnId: 't6', ...DONE })
-  const end = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const end = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await end.find({ type: 'Text', text: /estimate was/ }))?.text).toContain('estimate was 1m (off 0%)')
   await end.unmount()
 })
