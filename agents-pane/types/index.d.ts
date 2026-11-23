@@ -26,6 +26,11 @@ export type Ledger = {
   // Agent ids in spawn order.
   order: string[]
   agents: Record<string, AgentSnap>
+  // The main conversation: its turns' tokens, summed at each turn end.
+  main: TokenSplit
+  mainTurns: number
+  // The whole session's /cost estimate (main, subagents and mods' model calls); null before one exists.
+  sessionUsd: number | null
 }
 
 declare module 'claude-code' {

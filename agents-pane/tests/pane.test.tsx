@@ -36,12 +36,16 @@ const agent = (id: string, status: string, usd: number | undefined, startTime: n
   ...(usd === undefined ? {} : { cost: { usd } }),
 })
 
+// The session's /cost total the engine reports; a test sets it.
+let sessionUsd = 0
+
 async function setup($: any, on: any, list: () => unknown[]) {
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('clock.every', () => ({ value: undefined }))
   on('turn.complete', () => ({ text: '' }))
   on('agent.list', () => ({ value: list() as never }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: sessionUsd } } as never }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 }
 
@@ -131,7 +135,7 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
 })
 
 test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
-  const empty = { types: [], order: [], agents: {} }
+  const empty = { types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
   const snap = (id: string, type: string, status: string, out: number) => ({
     id,
     description: id,
@@ -180,4 +184,31 @@ test('splitCells: exact width, at least one cell per part with a share', async (
   expect(splitCells(10, [1, 1, 1])).toEqual([4, 3, 3])
   expect(splitCells(10, [100, 0.01])).toEqual([9, 1])
   expect(splitCells(5, [0, 0])).toEqual([0, 0])
+})
+
+test('the session block: main conversation beside the subagents, and the session total', async ($, on) => {
+  const now = Date.now()
+  sessionUsd = 3.0
+  await setup($, on, () => [agent('a1', 'completed', 0.75, now - 60_000)])
+  // Two main-loop turns: their usage adds up.
+  for (const id of ['m1', 'm2']) {
+    await $.turn.complete({
+      turnId: id,
+      ...DONE,
+      usage: { model: 'claude-opus-5-5', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 2000 },
+    } as never)
+  }
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const texts = await paneTexts($, surface)
+    expect(texts).toContain('SESSION')
+    expect(texts).toContain('Main conversation · 2 turns')
+    expect(texts).toContain('47.0k tok')
+    // $3.00 for the session, less $0.75 for the subagent.
+    expect(texts).toContain('$2.25')
+    expect(texts).toContain('Subagents · 1')
+    expect(texts).toContain('Session total')
+    expect(texts).toContain('$3.00')
+    expect(texts).toContain('53.5k tok')
+  }
+  sessionUsd = 0
 })
