@@ -135,7 +135,7 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
 })
 
 test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
-  const empty = { types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  const empty = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
   const snap = (id: string, type: string, status: string, out: number) => ({
     id,
     description: id,
@@ -252,9 +252,35 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
 })
 
 test('cost record: no session cost yet gives null main cost; unsafe ids are refused', async () => {
-  const l = { types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  const l = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
   expect(costRecord(l, 's', 0).main_usd).toBeNull()
   expect(isSafeId('216be8a9-f390-5737-904e-8abe3708475f')).toBe(true)
   expect(isSafeId('../x')).toBe(false)
   expect(isSafeId('a/b')).toBe(false)
+})
+
+test('a subagent turn with usage does not count as main; /clear starts the ledger over', async ($, on) => {
+  const now = Date.now()
+  let id = 'sess-1'
+  on('session.id', () => ({ value: id }))
+  sessionUsd = 1.0
+  await setup($, on, () => [agent('a1', 'running', 0.25, now - 1000)])
+  const used = { model: 'm', input_tokens: 100, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  await $.turn.complete({ turnId: 'm1', ...DONE, usage: used } as never)
+  await $.turn.complete({ turnId: 's1', agentId: 'a1', ...DONE, usage: used } as never)
+  let texts = await paneTexts($, 'desktop')
+  expect(texts).toContain('Main conversation · 1 turn')
+  expect(texts).toContain('200 tok')
+  // A late, smaller /cost reading does not lower the total.
+  sessionUsd = 0.5
+  await $.turn.complete({ turnId: 's2', agentId: 'a1', ...DONE } as never)
+  expect(await paneTexts($, 'desktop')).toContain('$1.00')
+  // /clear: a new session id, a new ledger.
+  id = 'sess-2'
+  sessionUsd = 0.1
+  await $.turn.complete({ turnId: 'm2', ...DONE, usage: used } as never)
+  texts = await paneTexts($, 'desktop')
+  expect(texts).toContain('Main conversation · 1 turn')
+  expect(texts).toContain('$0.10')
+  sessionUsd = 0
 })

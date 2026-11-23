@@ -21,6 +21,8 @@ export type AgentSnap = {
 }
 
 export type Ledger = {
+  // The session these figures belong to. After /clear the id changes and the ledger starts over.
+  sessionId: string
   // Agent types in the order the pane first saw them: the color slot of each type.
   types: string[]
   // Agent ids in spawn order.

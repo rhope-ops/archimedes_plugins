@@ -9,6 +9,7 @@ const PANE = 'agents-pane'
 const tick = atom({ plugin: 'agents-pane', key: 'tick' } as const, 0)
 // Every subagent of the session, also after Claude Code drops it from its own list.
 const EMPTY: Ledger = {
+  sessionId: '',
   types: [],
   order: [],
   agents: {},
@@ -16,7 +17,17 @@ const EMPTY: Ledger = {
   mainTurns: 0,
   sessionUsd: null,
 }
-const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-2' })
+const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-3' })
+
+// Start the ledger over when the session id changed (/clear). The first id seen is adopted.
+async function ensureSession($: EngineInterface): Promise<void> {
+  const id = await $.session.id()
+  const l = await read($, ledger)
+  if (l.sessionId === id) return
+  await update($, ledger, current =>
+    current.sessionId === id ? current : current.sessionId === '' ? { ...current, sessionId: id } : { ...EMPTY, sessionId: id },
+  )
+}
 
 const STATUS: Record<string, { icon: string; color: string; word: string }> = {
   pending: { icon: '○', color: 'inactive', word: 'waiting to start' },
@@ -33,13 +44,17 @@ const LIVE = ['running', 'waiting', 'pending']
 
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
+  await ensureSession($).catch(() => {})
   const list = (await $.agent.list()).filter(a => a.kind === 'local_agent')
   const t = Date.now()
   const before = await read($, ledger)
   const after = sync(before, list.map(snapOf), t)
   if (after !== before) await update($, ledger, current => sync(current, list.map(snapOf), t))
   const usd = (await $.session.usage()).cost?.usd ?? null
-  if (usd !== before.sessionUsd) await update($, ledger, current => ({ ...current, sessionUsd: usd }))
+  // The /cost total only grows within a session: an older reading that lands late never lowers it.
+  if (usd !== null && usd !== before.sessionUsd) {
+    await update($, ledger, current => (current.sessionUsd === null || current.sessionUsd < usd ? { ...current, sessionUsd: usd } : current))
+  }
 }
 
 function shortModel(id: string | null): string {
@@ -50,13 +65,22 @@ function shortModel(id: string | null): string {
 
 // Save the /cost record where the token-log Stop hook picks it up and pushes it with its rows.
 // TOKEN_LOG=off turns it off, as it does the hook; TOKEN_LOG_HOME moves it, as it does the hook's files.
-async function saveCost($: EngineInterface): Promise<void> {
+async function writeCost($: EngineInterface): Promise<void> {
   if ((await $.env.get('TOKEN_LOG')) === 'off') return
-  const base = (await $.env.get('TOKEN_LOG_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.claude/token-log`
+  const home = (await $.env.get('HOME')) ?? ''
+  const base = (await $.env.get('TOKEN_LOG_HOME')) || (home === '' ? '' : `${home}/.claude/token-log`)
   const id = await $.session.id()
   if (!base.startsWith('/') || !isSafeId(id)) return
+  // Read the ledger now, inside the queue, so the last write holds the newest figures.
   const record = costRecord(await read($, ledger), id, Date.now())
   await $.fs.write(`${base}/cost/${id}.json`, `${JSON.stringify(record, null, 1)}\n`)
+}
+
+// One write at a time: overlapping turn ends (main and subagent) queue up behind each other.
+const writes: { last: Promise<void> } = { last: Promise.resolve() }
+function saveCost($: EngineInterface): Promise<void> {
+  writes.last = writes.last.then(() => writeCost($)).catch(() => {})
+  return writes.last
 }
 
 const runMs = (a: AgentSnap, now: number) => Math.max(0, (a.endTime ?? now) - a.startTime)
@@ -105,14 +129,17 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     try {
+      // A turn with no usage (interrupted, or ended by an API error) adds no tokens and no turn.
       if (e.agentId === undefined && e.usage !== undefined) {
         const u = e.usage
+        await ensureSession($).catch(() => {})
         await update($, ledger, l => ({ ...l, main: addUsage(l.main, u), mainTurns: l.mainTurns + 1 }))
       }
-      await refresh($)
-      // At each turn end, so the Stop hook that runs right after finds this turn's figures.
-      await saveCost($)
     } catch {}
+    // Each step on its own: a failed refresh must not stop this turn's record.
+    await refresh($).catch(() => {})
+    // At each turn end, so the Stop hook that runs right after finds this turn's figures.
+    await saveCost($)
     return result
   })
 
