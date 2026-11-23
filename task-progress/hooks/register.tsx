@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
-import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
+import { MIN_SAMPLES, duration, estimate, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
 import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
 import type { Change } from './tasks'
@@ -18,6 +18,7 @@ const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, fal
 // Turn history across sessions, in this computer's plugin store.
 const HISTORY_KEY = 'history-v1'
 const HISTORY_MAX = 300
+const TERMINAL_COLOR: Record<string, string> = { success: 'green', warning: 'yellow', error: 'red' }
 
 // Short label for the tool that runs now.
 function describe(tool: string, input: Record<string, unknown>): string {
@@ -258,11 +259,11 @@ export const register: Register = on => {
       const isDone = p.outcome === 'Done'
       head = `● ${p.outcome} ${clock(elapsedMs)}`
       headColor = isDone ? 'green' : 'yellow'
-      const off = p.predictedMs === null ? 0 : Math.round(relError(p.predictedMs, elapsedMs) * 100)
-      const has = p.predictedMs !== null && isDone
-      tail = has ? ` estimate was ${duration(p.predictedMs ?? 0)} (off ${off}%)` : ''
-      shortTail = has ? ` off ${off}%` : ''
-      tailColor = 'gray'
+      // The same verdict as the desktop: ✓, "N× slower" or "N× faster", in the terminal's named colors.
+      const v = p.predictedMs !== null && isDone ? verdict(p.predictedMs, elapsedMs) : null
+      tail = v ? ` est ${duration(p.predictedMs ?? 0)} ${v.text}` : ''
+      shortTail = v ? ` ${v.text}` : ''
+      tailColor = v ? TERMINAL_COLOR[v.color] ?? 'gray' : 'gray'
       frac = 1
     } else {
       const est = estimate(history, p.promptChars, elapsedMs, plan)

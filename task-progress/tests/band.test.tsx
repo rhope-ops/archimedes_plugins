@@ -74,7 +74,9 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   clockMs += 40_000
   await $.turn.complete({ turnId: 't6', ...DONE })
   const end = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await end.find({ type: 'Text', text: /estimate was/ }))?.text).toContain('estimate was 1m (off 0%)')
+  const verdictText = await end.find({ type: 'Text', text: /est 1m/ })
+  expect(verdictText?.text).toContain('est 1m ✓')
+  expect(verdictText?.props?.color).toBe('green')
   await end.unmount()
 })
 
