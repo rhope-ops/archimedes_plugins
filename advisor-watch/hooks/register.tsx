@@ -39,7 +39,7 @@ export const register: Register = on => {
       if (calls > 0) {
         const session = await update($, sessionCount, n => n + calls)
         await $.store.set(TOTAL_KEY, (await total($)) + calls)
-        const tier = /(fable|opus|sonnet|haiku)/i.exec(e.model)?.[1]?.toLowerCase() ?? e.model
+        const tier = /(fable|opus|sonnet|haiku)/i.exec(response.usage?.model ?? e.model)?.[1]?.toLowerCase() ?? e.model
         const who = e.agentId === undefined ? 'main' : 'subagent'
         $.ui.toast(`Advisor consulted by ${tier} (${who}) · #${session} this session`)
         await show($, session)

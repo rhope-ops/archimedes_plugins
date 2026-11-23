@@ -7,11 +7,11 @@ const info = atom({ plugin: 'cache-tax', key: 'info' } as const, null, { shape: 
 const now = atom({ plugin: 'cache-tax', key: 'now' } as const, 0)
 
 const TTL_MS = { '5m': 5 * 60_000, '1h': 60 * 60_000 } as const
-// Warn this long before the cache goes cold.
-const SOON_MS = 5 * 60_000
+// Warn this long before the cache goes cold: 5 min for the 1h cache, 1 min for the 5m cache.
+const SOON_MS = { '5m': 60_000, '1h': 5 * 60_000 } as const
 
 function minutes(ms: number): string {
-  return `${Math.max(0, Math.round(ms / 60_000))} min`
+  return ms < 60_000 ? 'under 1 min' : `${Math.round(ms / 60_000)} min`
 }
 
 function kilo(n: number): string {
@@ -24,16 +24,17 @@ async function remember($: EngineInterface, ttl: '5m' | '1h' | undefined): Promi
   await update($, info, old => ({
     lastAt: t,
     ttl: ttl ?? old?.ttl ?? '1h',
-    tokens: usage.context.tokens ?? old?.tokens ?? 0,
-    percent: usage.context.percent ?? old?.percent ?? 0,
+    // Absent after /clear or /compact: then nothing large is re-read.
+    tokens: usage.context.tokens ?? 0,
+    percent: usage.context.percent ?? 0,
   }))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    // Redraw the band once a minute so the countdown moves.
-    await $.clock.every(60_000, async () => {
+    // Redraw the band every 15 s so the countdown moves.
+    await $.clock.every(15_000, async () => {
       const t = await $.clock.now()
       await update($, now, () => t)
     })
@@ -61,7 +62,7 @@ export const register: Register = on => {
     if (c === null || tick === 0 || e.props.hasSurvey || c.tokens < 20_000) return next(e)
 
     const left = c.lastAt + TTL_MS[c.ttl] - tick
-    if (left > SOON_MS) return next(e)
+    if (left > SOON_MS[c.ttl]) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const cost = `the next message re-reads about ${kilo(c.tokens)} tokens (${c.percent}% of context) at full price`

@@ -5,7 +5,6 @@ export type Progress = {
   steps: number
   tools: number
   current: string
-  subagents: number
   outcome: string
 }
 

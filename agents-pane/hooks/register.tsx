@@ -30,6 +30,7 @@ function shortModel(id: string | undefined): string {
 }
 
 export const register: Register = on => {
+  let isOpened = false
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'agents-pane', description: 'Open the subagents pane' })
     return next(e)
@@ -44,7 +45,10 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
     try {
-      void $.ui.open({ id: PANE, title: 'Subagents' })
+      if (!isOpened) {
+        isOpened = true
+        $.ui.open({ id: PANE, title: 'Subagents' }).catch(() => {})
+      }
       await redraw($)
     } catch {}
     return result

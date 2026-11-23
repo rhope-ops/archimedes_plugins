@@ -36,7 +36,16 @@ function commonDir(paths: string[]): string {
 const MARK = { read: '○', changed: '●', committed: '✔' } as const
 const COLOR = { read: 'gray', changed: 'yellow', committed: 'green' } as const
 
+// A real `git commit` (not commit-tree, --dry-run, or the word in a path or message).
+const COMMIT = /(^|[;&|]\s*)git\s+((-[cC]\s+\S+|--?[\w-]+(=\S+)?)\s+)*commit(?![-\w])(?![^;&|]*--dry-run)/
+
+function failed(result: unknown): boolean {
+  const r = result as { deny?: string; isError?: boolean }
+  return r.deny !== undefined || r.isError === true
+}
+
 export const register: Register = on => {
+  let isOpened = false
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'files', description: 'Open the pane of files Claude touched' })
     return next(e)
@@ -57,7 +66,10 @@ export const register: Register = on => {
     if (path && (isRead || isWrite)) {
       try {
         const t = await $.clock.now()
-        void $.ui.open({ id: PANE, title: 'Files' })
+        if (!isOpened) {
+          isOpened = true
+          $.ui.open({ id: PANE, title: 'Files' }).catch(() => {})
+        }
         await mark($, path, f => ({ ...f, isActive: true, at: t }))
       } catch {}
     }
@@ -65,16 +77,17 @@ export const register: Register = on => {
     const result = await next(e)
 
     try {
+      const isOk = !failed(result)
       if (path && (isRead || isWrite)) {
         await mark($, path, f => ({
           ...f,
           isActive: false,
-          // A read never downgrades a changed or committed file.
-          state: isWrite ? 'changed' : f.state,
+          // A read never downgrades; a failed write changes nothing.
+          state: isWrite && isOk ? 'changed' : f.state,
         }))
       }
-      // After a git commit, every changed file counts as committed.
-      if (/\bgit\b[^|;&]*\bcommit\b/.test(command)) {
+      // After a git commit that worked, the changed files count as committed.
+      if (isOk && COMMIT.test(command.trim())) {
         await update($, files, list =>
           list.map(f => (f.state === 'changed' ? { ...f, state: 'committed' } : f)),
         )

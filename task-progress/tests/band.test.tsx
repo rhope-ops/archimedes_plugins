@@ -3,7 +3,15 @@ import { expect, test } from 'claude-code/testing'
 const BAND = {
   plugin: 'task-progress',
   component: 'AbovePrompt',
-  props: { hasSurvey: false },
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: true,
+    maxRows: 3,
+    bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 3 },
+    view: {},
+  },
 } as const
 
 test('the band shows the running tool, then the outcome', async ($, on) => {
@@ -12,8 +20,9 @@ test('the band shows the running tool, then the outcome', async ($, on) => {
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: {} }))
-  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  on('clock.every', () => ({ value: undefined }))
   on('clock.now', () => ({ value: 1_000 }))
+  on('agent.list', () => ({ value: [] }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'go', turnId: 't1' })
@@ -26,7 +35,7 @@ test('the band shows the running tool, then the outcome', async ($, on) => {
     await ui.unmount()
   }
 
-  await $.turn.complete({ turnId: 't1', reason: 'answer' })
+  await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /Done/ }))?.text).toBe('● Done')
   await ui.unmount()

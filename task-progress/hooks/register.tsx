@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Progress } from '../types'
 
 const progress = atom({ plugin: 'task-progress', key: 'progress' } as const, null, {
-  shape: 'progress-1',
+  shape: 'progress-2',
 })
 const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
@@ -23,6 +23,14 @@ async function patch($: EngineInterface, fn: (p: Progress) => Progress): Promise
   await update($, progress, p => (p === null ? p : fn(p)))
 }
 
+// Moves the elapsed time once a second while a turn runs.
+async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> {
+  return $.clock.every(1000, async () => {
+    const ms = await $.clock.now()
+    await update($, now, () => ms)
+  })
+}
+
 function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -33,6 +41,12 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'progress', description: 'Show or hide the task progress band' })
+    // After a reload in the middle of a turn, start the clock again.
+    const p = await read($, progress)
+    if (p?.isRunning) {
+      ticker?.cancel()
+      ticker = await startTicker($)
+    }
     return next(e)
   })
 
@@ -42,10 +56,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId !== undefined) {
-      await patch($, p => ({ ...p, subagents: p.subagents + 1 }))
-      return next(e)
-    }
+    if (e.agentId !== undefined) return next(e)
     const t = await $.clock.now()
     await update($, now, () => t)
     await update($, progress, () => ({
@@ -55,14 +66,10 @@ export const register: Register = on => {
       steps: 0,
       tools: 0,
       current: 'Thinking',
-      subagents: 0,
       outcome: '',
     }))
     ticker?.cancel()
-    ticker = await $.clock.every(1000, async () => {
-      const ms = await $.clock.now()
-      await update($, now, () => ms)
-    })
+    ticker = await startTicker($)
     return next(e)
   })
 
@@ -85,10 +92,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId !== undefined) {
-      await patch($, p => ({ ...p, subagents: Math.max(0, p.subagents - 1) }))
-      return next(e)
-    }
+    if (e.agentId !== undefined) return next(e)
     ticker?.cancel()
     ticker = undefined
     const t = await $.clock.now()
@@ -105,6 +109,10 @@ export const register: Register = on => {
     const t = p.isRunning ? await read($, now) : p.endedAt
     const elapsed = clock(t - p.startedAt)
     const counts = `${p.steps} steps · ${p.tools} tools`
+    // Read live, so background subagents from an earlier turn count too.
+    const subagents = (await $.agent.list()).filter(
+      a => a.kind === 'local_agent' && a.status === 'running',
+    ).length
 
     if (!p.isRunning) {
       return (
@@ -121,7 +129,7 @@ export const register: Register = on => {
         <Text> {p.current}</Text>
         <Text dimColor>
           {' '}· {counts}
-          {p.subagents > 0 ? ` · ${p.subagents} subagents running` : ''}
+          {subagents > 0 ? ` · ${subagents} subagents running` : ''}
         </Text>
       </Box>
     )
