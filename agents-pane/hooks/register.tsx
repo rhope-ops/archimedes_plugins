@@ -20,14 +20,19 @@ const EMPTY: Ledger = {
 const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-3' })
 
 // Start the ledger over when the session id changed (/clear). The first id seen is adopted.
-async function ensureSession($: EngineInterface): Promise<void> {
+// Resolves the id, so a caller can drop a reading taken under another session.
+async function ensureSession($: EngineInterface): Promise<string> {
   const id = await $.session.id()
   const l = await read($, ledger)
-  if (l.sessionId === id) return
+  if (l.sessionId === id) return id
   await update($, ledger, current =>
     current.sessionId === id ? current : current.sessionId === '' ? { ...current, sessionId: id } : { ...EMPTY, sessionId: id },
   )
+  return id
 }
+
+// True when a reading taken under session `id` still belongs to the ledger ('' = the id is unknown).
+const isSameSession = (l: Ledger, id: string) => id === '' || l.sessionId === '' || l.sessionId === id
 
 const STATUS: Record<string, { icon: string; color: string; word: string }> = {
   pending: { icon: '○', color: 'inactive', word: 'waiting to start' },
@@ -44,16 +49,19 @@ const LIVE = ['running', 'waiting', 'pending']
 
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
-  await ensureSession($).catch(() => {})
+  const id = await ensureSession($).catch(() => '')
   const list = (await $.agent.list()).filter(a => a.kind === 'local_agent')
   const t = Date.now()
   const before = await read($, ledger)
   const after = sync(before, list.map(snapOf), t)
-  if (after !== before) await update($, ledger, current => sync(current, list.map(snapOf), t))
+  // A reading taken before a /clear reset is dropped, so the old session's agents do not come back.
+  if (after !== before) await update($, ledger, current => (isSameSession(current, id) ? sync(current, list.map(snapOf), t) : current))
   const usd = (await $.session.usage()).cost?.usd ?? null
   // The /cost total only grows within a session: an older reading that lands late never lowers it.
   if (usd !== null && usd !== before.sessionUsd) {
-    await update($, ledger, current => (current.sessionUsd === null || current.sessionUsd < usd ? { ...current, sessionUsd: usd } : current))
+    await update($, ledger, current =>
+      isSameSession(current, id) && (current.sessionUsd === null || current.sessionUsd < usd) ? { ...current, sessionUsd: usd } : current,
+    )
   }
 }
 
@@ -72,14 +80,21 @@ async function writeCost($: EngineInterface): Promise<void> {
   const id = await $.session.id()
   if (!base.startsWith('/') || !isSafeId(id)) return
   // Read the ledger now, inside the queue, so the last write holds the newest figures.
-  const record = costRecord(await read($, ledger), id, Date.now())
+  const l = await read($, ledger)
+  // Never write one session's figures under another session's id.
+  if (l.sessionId !== '' && l.sessionId !== id) return
+  const record = costRecord(l, id, Date.now())
   await $.fs.write(`${base}/cost/${id}.json`, `${JSON.stringify(record, null, 1)}\n`)
 }
 
 // One write at a time: overlapping turn ends (main and subagent) queue up behind each other.
 const writes: { last: Promise<void> } = { last: Promise.resolve() }
+// A write that does not finish in 3 s gives up its place, so a stuck write never holds the queue or the turn end.
+const WRITE_MS = 3000
 function saveCost($: EngineInterface): Promise<void> {
-  writes.last = writes.last.then(() => writeCost($)).catch(() => {})
+  // A timer that cannot start must not win the race: the write then simply runs to its end.
+  const timeout = () => $.clock.sleep(WRITE_MS).catch(() => new Promise<void>(() => {}))
+  writes.last = writes.last.then(() => Promise.race([writeCost($), timeout()])).catch(() => {})
   return writes.last
 }
 
