@@ -10,7 +10,7 @@ Start a new cloud session with the repository `rhope-ops/archimedes_lever`. Past
 
 ## Input file (written by the agents-pane mod 0.5.0)
 
-`$TOKEN_LOG_HOME/cost/<session id>.json`. The default is `~/.claude/token-log/cost/`, the folder the hook already uses for push.log. The file is rewritten at each turn end. It is JSON, `version: 1`:
+`$TOKEN_LOG_HOME/cost/<session id>.json`. The default is `~/.claude/token-log/cost/`, the folder the hook already uses for push.log. The mod rewrites the file just after each turn end, from a timer, so the turn never waits for the disk. It is JSON, `version: 1`:
 
 - `session_id`, `written_at` (ISO UTC).
 - `session_usd`, `main_usd` and `subagents_usd`: Claude Code's `/cost` estimate. `session_usd` and `main_usd` can be null.

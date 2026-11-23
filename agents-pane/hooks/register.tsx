@@ -50,6 +50,8 @@ const LIVE = ['running', 'waiting', 'pending']
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
   const id = await ensureSession($).catch(() => '')
+  // Without the session id a reading cannot be placed safely: skip it; the next one comes in 2 s.
+  if (id === '') return
   const list = (await $.agent.list()).filter(a => a.kind === 'local_agent')
   const t = Date.now()
   const before = await read($, ledger)
@@ -73,7 +75,7 @@ function shortModel(id: string | null): string {
 
 // Save the /cost record where the token-log Stop hook picks it up and pushes it with its rows.
 // TOKEN_LOG=off turns it off, as it does the hook; TOKEN_LOG_HOME moves it, as it does the hook's files.
-async function writeCost($: EngineInterface): Promise<void> {
+async function writeCost($: EngineInterface, seq: number): Promise<void> {
   if ((await $.env.get('TOKEN_LOG')) === 'off') return
   const home = (await $.env.get('HOME')) ?? ''
   const base = (await $.env.get('TOKEN_LOG_HOME')) || (home === '' ? '' : `${home}/.claude/token-log`)
@@ -84,18 +86,17 @@ async function writeCost($: EngineInterface): Promise<void> {
   // Never write one session's figures under another session's id.
   if (l.sessionId !== '' && l.sessionId !== id) return
   const record = costRecord(l, id, Date.now())
+  // A newer write is queued: it reads newer figures, so this one is skipped.
+  if (seq !== writes.seq) return
   await $.fs.write(`${base}/cost/${id}.json`, `${JSON.stringify(record, null, 1)}\n`)
 }
 
-// One write at a time: overlapping turn ends (main and subagent) queue up behind each other.
-const writes: { last: Promise<void> } = { last: Promise.resolve() }
-// A write that does not finish in 3 s gives up its place, so a stuck write never holds the queue or the turn end.
-const WRITE_MS = 3000
-function saveCost($: EngineInterface): Promise<void> {
-  // A timer that cannot start must not win the race: the write then simply runs to its end.
-  const timeout = () => $.clock.sleep(WRITE_MS).catch(() => new Promise<void>(() => {}))
-  writes.last = writes.last.then(() => Promise.race([writeCost($), timeout()])).catch(() => {})
-  return writes.last
+// One write at a time, the newest only. A write that is already under way when a newer one starts may still
+// land after it (a slow disk); the next turn's write corrects that.
+const writes: { last: Promise<void>; seq: number } = { last: Promise.resolve(), seq: 0 }
+function saveCost($: EngineInterface): void {
+  const seq = ++writes.seq
+  writes.last = writes.last.then(() => writeCost($, seq)).catch(() => {})
 }
 
 const runMs = (a: AgentSnap, now: number) => Math.max(0, (a.endTime ?? now) - a.startTime)
@@ -153,8 +154,11 @@ export const register: Register = on => {
     } catch {}
     // Each step on its own: a failed refresh must not stop this turn's record.
     await refresh($).catch(() => {})
-    // At each turn end, so the Stop hook that runs right after finds this turn's figures.
-    await saveCost($)
+    // From a timer, so the turn end never waits for the disk. The token-log hook reads the file when it
+    // pushes, in the background, so this turn's figures are there in time.
+    try {
+      await $.clock.after(1, async () => saveCost($))
+    } catch {}
     return result
   })
 
