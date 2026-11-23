@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, Ledger } from '../types'
-import { addUsage, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
+import { addUsage, costRecord, isSafeId, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
@@ -46,6 +46,17 @@ function shortModel(id: string | null): string {
   if (!id) return '?'
   const m = /(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/i.exec(id)
   return m ? `${m[1]?.toLowerCase()} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
+}
+
+// Save the /cost record where the token-log Stop hook picks it up and pushes it with its rows.
+// TOKEN_LOG=off turns it off, as it does the hook; TOKEN_LOG_HOME moves it, as it does the hook's files.
+async function saveCost($: EngineInterface): Promise<void> {
+  if ((await $.env.get('TOKEN_LOG')) === 'off') return
+  const base = (await $.env.get('TOKEN_LOG_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.claude/token-log`
+  const id = await $.session.id()
+  if (!base.startsWith('/') || !isSafeId(id)) return
+  const record = costRecord(await read($, ledger), id, Date.now())
+  await $.fs.write(`${base}/cost/${id}.json`, `${JSON.stringify(record, null, 1)}\n`)
 }
 
 const runMs = (a: AgentSnap, now: number) => Math.max(0, (a.endTime ?? now) - a.startTime)
@@ -99,6 +110,8 @@ export const register: Register = on => {
         await update($, ledger, l => ({ ...l, main: addUsage(l.main, u), mainTurns: l.mainTurns + 1 }))
       }
       await refresh($)
+      // At each turn end, so the Stop hook that runs right after finds this turn's figures.
+      await saveCost($)
     } catch {}
     return result
   })

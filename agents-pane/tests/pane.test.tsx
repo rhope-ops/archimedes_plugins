@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
+import { costRecord, isSafeId, splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -211,4 +211,50 @@ test('the session block: main conversation beside the subagents, and the session
     expect(texts).toContain('53.5k tok')
   }
   sessionUsd = 0
+})
+
+test('each turn end writes the /cost record where the token-log hook reads it', async ($, on) => {
+  const now = Date.now()
+  const files = new Map<string, string>()
+  const env: Record<string, string | undefined> = { HOME: '/home/t', TOKEN_LOG: undefined, TOKEN_LOG_HOME: undefined }
+  sessionUsd = 2.0
+  on('env.get', (_: unknown, e: { name: string }) => ({ value: env[e.name] }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('fs.write', (_: unknown, e: { path: string; text: string }) => (files.set(e.path, e.text), { value: undefined }))
+  await setup($, on, () => [agent('a1', 'completed', 0.5, now - 60_000, 'Explore')])
+  await $.turn.complete({
+    turnId: 'm1',
+    ...DONE,
+    usage: { model: 'claude-opus-5-5', input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 },
+  } as never)
+  const text = files.get('/home/t/.claude/token-log/cost/sess-1.json')
+  expect(text).toBeDefined()
+  const r = JSON.parse(text ?? '{}')
+  expect(r.version).toBe(1)
+  expect(r.session_usd).toBe(2)
+  expect(r.main_usd).toBe(1.5)
+  expect(r.subagents_usd).toBe(0.5)
+  expect(r.main).toEqual({ turns: 1, input: 10, output: 20, cache_read: 30, cache_write: 40 })
+  expect(r.subagents[0].type).toBe('Explore')
+  // No task text in the record.
+  expect(text).not.toContain('Task a1')
+
+  // TOKEN_LOG_HOME moves it; TOKEN_LOG=off stops it.
+  files.clear()
+  env.TOKEN_LOG_HOME = '/var/tl'
+  await $.turn.complete({ turnId: 'm2', ...DONE } as never)
+  expect([...files.keys()]).toEqual(['/var/tl/cost/sess-1.json'])
+  files.clear()
+  env.TOKEN_LOG = 'off'
+  await $.turn.complete({ turnId: 'm3', ...DONE } as never)
+  expect(files.size).toBe(0)
+  sessionUsd = 0
+})
+
+test('cost record: no session cost yet gives null main cost; unsafe ids are refused', async () => {
+  const l = { types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  expect(costRecord(l, 's', 0).main_usd).toBeNull()
+  expect(isSafeId('216be8a9-f390-5737-904e-8abe3708475f')).toBe(true)
+  expect(isSafeId('../x')).toBe(false)
+  expect(isSafeId('a/b')).toBe(false)
 })
