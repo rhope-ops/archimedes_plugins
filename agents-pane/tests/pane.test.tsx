@@ -60,7 +60,7 @@ test('cards show the /cost estimate and the tokens; running first', async ($, on
   }
 })
 
-test('helpers: model names with dates, token rounding', async () => {
+test('helpers: token rounding', async () => {
   expect(tokensText(999_950)).toBe('1.0M')
   expect(tokensText(99_960)).toBe('100k')
   expect(tokensText(1_500)).toBe('1.5k')

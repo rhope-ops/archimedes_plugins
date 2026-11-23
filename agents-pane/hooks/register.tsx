@@ -100,6 +100,7 @@ export const register: Register = on => {
     // Sum the agents that have a cost yet; a '+' marks that one or more have none yet.
     const usd = rows.reduce((n, r) => n + (r.usd ?? 0), 0)
     const isPartial = rows.some(r => r.usd === undefined)
+    const hasCost = rows.some(r => r.usd !== undefined)
     const room = Math.max(3, Math.floor(((e.viewport?.rows ?? 30) - 6) / 4))
 
     const card = (r: (typeof rows)[number], isLive: boolean) => {
@@ -155,8 +156,8 @@ export const register: Register = on => {
               {running} running · {rest.length} finished
             </Text>
             <Text weight="bold" tabular wrap="clip">
-              {usdText(usd)}
-              {isPartial ? '+' : ''}
+              {hasCost ? usdText(usd) : usdText(undefined)}
+              {hasCost && isPartial ? '+' : ''}
             </Text>
           </Box>
           <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={1}>
@@ -172,7 +173,7 @@ export const register: Register = on => {
         {live.length > room && (
           <Box paddingX={1}>
             <Text dimColor size="footnote">
-              +{live.length - room} more running
+              +{live.length - room} more active
             </Text>
           </Box>
         )}
