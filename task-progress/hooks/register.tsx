@@ -1,8 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Plan, Progress, TaskList, TaskStatus, TurnRecord } from '../types'
+import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
+import { apply, applyChange, completedChange } from './tasks'
+import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
 const progress = atom({ plugin: 'task-progress', key: 'progress' } as const, null, {
@@ -53,66 +55,26 @@ async function patch($: EngineInterface, fn: (p: Progress) => Progress): Promise
   await update($, progress, p => (p === null ? p : fn(p)))
 }
 
-const STATUSES: readonly string[] = ['pending', 'in_progress', 'completed']
-
 function failed(result: unknown): boolean {
   const r = result as { deny?: string; isError?: boolean }
   return r.deny !== undefined || r.isError === true
 }
 
-// Note which tasks became completed (or stopped being completed) during this turn.
-async function noteTurn($: EngineInterface, before: TaskList, after: TaskList): Promise<void> {
-  const was = new Set(before.filter(t => t.status === 'completed').map(t => t.id))
-  const now = new Set(after.filter(t => t.status === 'completed').map(t => t.id))
-  await patch($, p => {
-    const kept = p.completedInTurn.filter(id => now.has(id))
-    const added = [...now].filter(id => !was.has(id) && !kept.includes(id))
-    return { ...p, completedInTurn: [...kept, ...added] }
-  })
-}
-
 // Update the task list from a task tool call that worked, using its result.
-async function track(
-  $: EngineInterface,
-  tool: string,
-  args: Record<string, unknown>,
-  ran: unknown,
-): Promise<void> {
+async function track($: EngineInterface, tool: string, args: Record<string, unknown>, ran: unknown): Promise<void> {
   if (failed(ran)) return
   const result = (ran as { result?: unknown }).result as Record<string, unknown> | undefined
-  const before = await read($, tasks)
-  let after: TaskList | undefined
-
-  if (tool === 'TodoWrite') {
-    const todos = (Array.isArray(result?.newTodos) ? result.newTodos : args.todos) as
-      | { content?: string; status?: string }[]
-      | undefined
-    if (!Array.isArray(todos)) return
-    after = todos.map((t, i) => ({
-      id: `todo:${t.content ?? i}`,
-      status: (STATUSES.includes(t.status ?? '') ? t.status : 'pending') as TaskStatus,
-    }))
-  } else if (tool === 'TaskCreate') {
-    const task = result?.task as { id?: unknown } | undefined
-    const id = typeof task?.id === 'string' ? task.id : `new-${before.length + 1}`
-    // A new task after a finished list starts a new list.
-    const isFinished = before.length > 0 && before.every(t => t.status === 'completed')
-    after = [...(isFinished ? [] : before.filter(t => t.id !== id)), { id, status: 'pending' }]
-  } else if (tool === 'TaskUpdate' && typeof args.taskId === 'string') {
-    if (result?.success === false) return
-    const id = args.taskId
-    const status = args.status
-    if (status === 'deleted') {
-      after = before.filter(t => t.id !== id)
-    } else if (typeof status === 'string' && STATUSES.includes(status)) {
-      const entry = { id, status: status as TaskStatus }
-      after = before.some(t => t.id === id) ? before.map(t => (t.id === id ? entry : t)) : [...before, entry]
-    }
+  let change: Change | undefined
+  // Computed from the current value inside `update`, so parallel calls do not lose updates.
+  await update($, tasks, current => {
+    const after = apply(current, tool, args, result, () => `new-${crypto.randomUUID()}`)
+    change = after === undefined ? undefined : completedChange(current, after)
+    return after ?? current
+  })
+  const c = change
+  if (c !== undefined && (c.added.length > 0 || c.removed.length > 0)) {
+    await patch($, p => ({ ...p, completedInTurn: applyChange(p.completedInTurn, c) }))
   }
-
-  if (after === undefined) return
-  await update($, tasks, () => after)
-  await noteTurn($, before, after)
 }
 
 function planOf(list: TaskList, completedInTurn: readonly string[]): Plan {

@@ -190,3 +190,37 @@ test('a reopened task, an unknown id and a failed update count for nothing', asy
   expect(b.eta).toBe(' ETA learning 0/5')
   expect(b.step).toContain('task 1 of 3')
 })
+
+test('parallel task calls lose no update', async ($, on) => {
+  const clock = { ms: 0 }
+  taskEngine(on, clock)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await Promise.all(['a', 'b', 'c', 'd'].map(s => $.tool.call(create(s))))
+  clock.ms = 20_000
+  await Promise.all([$.tool.call(set('1', 'completed')), $.tool.call(set('2', 'completed'))])
+  const b = await band($)
+  // 20 s for 2 tasks, 2 left: 20 s.
+  expect(b.step).toContain('task 3 of 4')
+  expect(b.eta).toBe(' ~20s left (by tasks)')
+})
+
+test('todos with the same text stay separate tasks', async ($, on) => {
+  const clock = { ms: 0 }
+  taskEngine(on, clock)
+  const todos = (done: number) => ({
+    tool: 'TodoWrite' as const,
+    todos: [0, 1, 2, 3].map(i => ({
+      content: 'run tests',
+      status: (i < done ? 'completed' : 'pending') as 'completed' | 'pending',
+      activeForm: 'running tests',
+    })),
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call(todos(0))
+  clock.ms = 20_000
+  await $.tool.call(todos(2))
+  // 10 s per task, 2 left: 20 s.
+  expect((await band($)).eta).toBe(' ~20s left (by tasks)')
+})
