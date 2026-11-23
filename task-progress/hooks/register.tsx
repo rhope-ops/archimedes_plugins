@@ -297,7 +297,7 @@ export const register: Register = on => {
       const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
       const RUN = 400
       const run = (key: string, glyph: string, color: string | null, box: Record<string, string | number>) => (
-        <Box key={key} flexShrink={0} overflow="hidden" {...box}>
+        <Box key={key} overflow="hidden" flexShrink={0} {...box}>
           {color === null ? (
             <Text mono size="caption" dimColor wrap="clip" maxLines={1}>
               {glyph.repeat(RUN)}
@@ -324,13 +324,15 @@ export const register: Register = on => {
           </Text>
         </Box>
       )
-      const at = (Math.floor(elapsedMs / 1000) * 7) % 90
+      // The glow starts at 0-75% of the row, so its 5 glyphs fit whole on rows of 20+ columns.
+      const at = (Math.floor(elapsedMs / 1000) * 7) % 76
       const bars =
         frac === null
           ? [run('before', '░', null, { width: `${at}%` }), piece('glow', '▒▓█▓▒', fillColor), track('after')]
           : frac >= 1
             ? [run('fill', '█', fillColor, { flexGrow: 1, flexShrink: 1, minWidth: 0 })]
-            : [run('fill', '█', fillColor, { width: share(frac) }), piece('edge', '▓▒', fillColor), track('rest')]
+            : // The fill may shrink a little, so the ▓▒ edge always fits whole near 100%.
+              [run('fill', '█', fillColor, { width: share(frac), flexShrink: 1, minWidth: 0 }), piece('edge', '▓▒', fillColor), track('rest')]
       const t = (key: string, text: string, props: Record<string, string | boolean>) => (
         <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
           {text}

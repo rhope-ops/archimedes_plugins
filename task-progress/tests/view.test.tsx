@@ -164,3 +164,43 @@ test('the estimate verdict', async () => {
   expect(verdict(60_000, 100_000)).toEqual({ text: '1.7× slower', color: 'warning' })
   expect(verdict(60_000, 70_000)).toEqual({ text: '✓', color: 'success' })
 })
+
+test('desktop bar: fill and edge at 30%, full run when done', async ($, on) => {
+  let clockMs = 0
+  const store = new Map<string, unknown>()
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', () => ({ result: {} }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: clockMs }))
+  on('agent.list', () => ({ value: [] }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
+  const END = { reason: 'answer', answer: '', durationMs: 1, isAborted: false } as const
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const id of ['t1', 't2', 't3', 't4', 't5']) {
+    clockMs += 1000
+    await $.turn.start({ text: 'go', turnId: id })
+    clockMs += 100_000
+    await $.turn.complete({ turnId: id, ...END })
+  }
+  clockMs += 1000
+  await $.turn.start({ text: 'go', turnId: 't6' })
+  clockMs += 30_000
+  let ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
+  const fill = await ui.find({ key: 'fill' })
+  expect(fill?.props?.width).toBe('30%')
+  expect(fill?.props?.flexShrink).toBe(1)
+  expect(await ui.find({ type: 'Text', text: '▓▒' })).toBeDefined()
+  await ui.unmount()
+
+  clockMs += 70_000
+  await $.turn.complete({ turnId: 't6', ...END })
+  ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
+  expect((await ui.find({ key: 'fill' }))?.props?.flexGrow).toBe(1)
+  expect(await ui.find({ type: 'Text', text: '▓▒' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text', text: /^█+$/ })).every(t => t.props?.mono && t.props?.size === 'caption')).toBe(true)
+  await ui.unmount()
+})
