@@ -4,13 +4,20 @@ Personal Claude Code mods that show what Claude does now: progress, subagents, a
 
 | Mod | What it shows | Command |
 |---|---|---|
-| task-progress | A row above the prompt: elapsed time, the tool that runs now, steps, tool calls, running subagents | `/progress` shows or hides it |
+| task-progress | Two rows above the prompt, across the full width. Row 1: elapsed time, a progress bar, percent done and estimated time left. Row 2: the tool that runs now, with steps, tool calls, task X of Y and running subagents at the right | `/progress` shows or hides it; `/progress-stats` shows how accurate the estimate is |
 | agents-pane | A side pane with each subagent: task, type, model, tokens, estimated cost | `/agents-pane` |
 | advisor-watch | A toast each time the advisor is consulted, with the caller's model; counts in the status line | `/advisor-stats` |
 | file-tree | A side pane of files: ○ read, ● changed, ✔ committed, ◐ in use now | `/files` |
 | cache-tax | A row above the prompt before the prompt cache goes cold (5 min before for the 1-hour cache, 1 min before for the 5-minute cache), and a red row after | none |
 
 Costs are estimates from Claude Code, not a bill.
+
+## How task-progress estimates the time left
+
+1. If the turn has a task list (TaskCreate, TaskUpdate or TodoWrite) and at least 1 task is done in this turn: time per done task × tasks left. The band shows "(by tasks)".
+2. Otherwise, from history: of your past turns with a similar prompt size that ran longer than this turn so far, the median end time. The band shows "ETA learning n/5" until 5 turns are recorded, and "longer than usual" when this turn runs longer than all of them.
+
+At the end of each turn that ends with an answer, the mod records the turn (time, steps, tool calls and prompt length, not the prompt text) and the error of its first estimate. It keeps the last 300 turns in the plugin store on that computer. `/progress-stats` shows the median error of the last 20 turns against the 20 turns before them.
 
 ## Install on your computer
 
@@ -24,6 +31,8 @@ Plugins that you install once with the "user" scope work in the terminal, in des
 4. Install each mod that you want from the table above.
 
 ### In a terminal (outside Claude Code)
+
+This needs the separate Claude Code command-line tool. The desktop app does not add the `claude` command to PowerShell or to a terminal. If PowerShell says that `claude` is not a cmdlet, use the desktop app steps above, or install the command-line tool first (see the setup page of the Claude Code docs).
 
 1. Type this command and push Enter. You see that the marketplace `archimedes-plugins` is added.
 
