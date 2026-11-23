@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bar, blockCount, cells, fit, litBlocks, row1, row2, sweep, verdict } from '../hooks/view'
+import { bar, cells, fit, row1, row2, sweep, verdict } from '../hooks/view'
 
 test('the bar fills in eighth steps and keeps its width', async () => {
   expect(bar(10, 0)).toEqual({ fill: '', empty: '░░░░░░░░░░' })
@@ -141,8 +141,6 @@ test('desktop: metrics fixed at the right, tool text cut first, bar on its own r
   clockMs = 47_000
   const ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
-  // No text holds bar glyphs: the bar is the app's own element.
-  expect(texts.some(t => /[█░▒▓]/.test(t))).toBe(false)
   const all = texts.join(' ')
   expect(all).toContain('ETA learning 0/5')
   expect(all).toContain('Bash: Run the test suite')
@@ -155,28 +153,20 @@ test('desktop: metrics fixed at the right, tool text cut first, bar on its own r
   expect((await ui.find({ type: 'Text', text: /ETA learning 0\/5/ }))?.props?.wrap).toBe('clip')
   const tool = await ui.findAll({ type: 'Text', text: /Run the test suite/ })
   expect(tool.map(t => t.props?.maxLines)).toContain(1)
-  // The bar: whole square blocks only, one per 2 columns.
-  const blocks = await ui.findAll({ type: 'Text', text: /^■$/ })
-  expect(blocks.length).toBe(60)
-  expect((await ui.find({ key: 'bar' }))?.props?.overflow).toBe('hidden')
+  // The bar while learning: a ░ track with the ▒▓█▓▒ glow, small monospace, cut at the row's edge.
+  expect(await ui.find({ type: 'Text', text: '▒▓█▓▒' })).toBeDefined()
+  const shade = await ui.findAll({ type: 'Text', text: /^░+$/ })
+  expect(shade.length).toBe(2)
+  expect(shade.every(t => t.props?.mono === true && t.props?.wrap === 'clip')).toBe(true)
   await ui.unmount()
 
-  // Under 12 columns the bar still draws its minimum of 12 blocks: the row clips them at the edge.
+  // At a narrow width the bar row clips what does not fit at its edge.
   const narrow = await $.ui.mount({ ...BAND(10, 3), surface: 'desktop' })
-  expect((await narrow.findAll({ type: 'Text', text: /^■$/ })).length).toBe(12)
   expect((await narrow.find({ key: 'bar' }))?.props?.overflow).toBe('hidden')
   await narrow.unmount()
 })
 
-test('bar blocks and the estimate verdict', async () => {
-  expect(blockCount(30)).toBe(15)
-  expect(blockCount(500)).toBe(60)
-  expect(blockCount(10)).toBe(12)
-  expect(litBlocks(10, 0.5, 0).filter(Boolean).length).toBe(5)
-  expect(litBlocks(10, 1, 0).every(Boolean)).toBe(true)
-  const moving = litBlocks(10, null, 3)
-  expect(moving.filter(Boolean).length).toBe(4)
-  expect(moving[3]).toBe(true)
+test('the estimate verdict', async () => {
   expect(verdict(95_000, 8_000)).toEqual({ text: '12× faster', color: 'error' })
   expect(verdict(60_000, 100_000)).toEqual({ text: '1.7× slower', color: 'warning' })
   expect(verdict(60_000, 70_000)).toEqual({ text: '✓', color: 'success' })
@@ -195,4 +185,44 @@ test('the verdict color matches the shown, rounded number', async () => {
   expect(verdict(100_000, 204_000)).toEqual({ text: '2.0× slower', color: 'warning' })
   expect(verdict(204_000, 100_000)).toEqual({ text: '2.0× faster', color: 'warning' })
   expect(verdict(100_000, 210_000)).toEqual({ text: '2.1× slower', color: 'error' })
+})
+
+test('desktop bar: fill and edge at 30%, full run when done', async ($, on) => {
+  let clockMs = 0
+  const store = new Map<string, unknown>()
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', () => ({ result: {} }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: clockMs }))
+  on('agent.list', () => ({ value: [] }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
+  const END = { reason: 'answer', answer: '', durationMs: 1, isAborted: false } as const
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const id of ['t1', 't2', 't3', 't4', 't5']) {
+    clockMs += 1000
+    await $.turn.start({ text: 'go', turnId: id })
+    clockMs += 100_000
+    await $.turn.complete({ turnId: id, ...END })
+  }
+  clockMs += 1000
+  await $.turn.start({ text: 'go', turnId: 't6' })
+  clockMs += 30_000
+  let ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
+  const fill = await ui.find({ key: 'fill' })
+  expect(fill?.props?.width).toBe('30%')
+  expect(fill?.props?.flexShrink).toBe(1)
+  expect(await ui.find({ type: 'Text', text: '▓▒' })).toBeDefined()
+  await ui.unmount()
+
+  clockMs += 70_000
+  await $.turn.complete({ turnId: 't6', ...END })
+  ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
+  expect((await ui.find({ key: 'fill' }))?.props?.flexGrow).toBe(1)
+  expect(await ui.find({ type: 'Text', text: '▓▒' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text', text: /^█+$/ })).every(t => t.props?.mono && t.props?.size === 'caption')).toBe(true)
+  await ui.unmount()
 })

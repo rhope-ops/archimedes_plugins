@@ -107,21 +107,6 @@ export function row2(width: number, current: string, counts: string): { left: st
   return { left, space, right }
 }
 
-// How many whole blocks the desktop bar draws: about one per 2 columns, 12 to 60.
-export function blockCount(columns: number): number {
-  return Math.max(12, Math.min(60, Math.round(columns / 2)))
-}
-
-// Which blocks are lit: the first `frac` share, or a moving window of 4 while there is no estimate.
-export function litBlocks(n: number, frac: number | null, tick: number): boolean[] {
-  if (frac === null) {
-    const at = ((tick % n) + n) % n
-    return Array.from({ length: n }, (_, i) => (i - at + n) % n < 4)
-  }
-  const k = Math.round(Math.min(1, Math.max(0, frac)) * n)
-  return Array.from({ length: n }, (_, i) => i < k)
-}
-
 // The verdict on a finished turn's first estimate: on target, slower or faster, with a color.
 // Symmetric: ✓ when the larger time is at most 1.25× the smaller, in either direction.
 // The color comes from the shown (rounded) number, so "2.0×" is always yellow.

@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, blockCount, fit, litBlocks, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
+import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -292,11 +292,48 @@ export const register: Register = on => {
 
     // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
     // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
-    // Row 2, after a small gap: whole square blocks spread across the row, so no block is ever cut.
+    // Row 2, right under it: a shaded block bar (█ fill, ▓▒ edge, ░ track; while learning a moving ░▒▓█▓▒░ glow).
+    // Runs of one glyph sit in boxes sized as a share of the row and are cut at their edge: solid runs show no seam.
     if (e.surface !== 'terminal') {
       const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
-      const n = blockCount(width)
-      const lit = litBlocks(n, frac, Math.floor(elapsedMs / 1000))
+      const RUN = 400
+      const run = (key: string, glyph: string, color: string | null, box: Record<string, string | number>) => (
+        <Box key={key} overflow="hidden" flexShrink={0} {...box}>
+          {color === null ? (
+            <Text mono size="caption" dimColor wrap="clip" maxLines={1}>
+              {glyph.repeat(RUN)}
+            </Text>
+          ) : (
+            <Text mono size="caption" color={color} wrap="clip" maxLines={1}>
+              {glyph.repeat(RUN)}
+            </Text>
+          )}
+        </Box>
+      )
+      const piece = (key: string, text: string, color: string) => (
+        <Box key={key} flexShrink={0}>
+          <Text mono size="caption" color={color} wrap="clip" maxLines={1}>
+            {text}
+          </Text>
+        </Box>
+      )
+      const share = (x: number) => `${Math.round(Math.min(1, Math.max(0, x)) * 100)}%`
+      const track = (key: string) => (
+        <Box key={key} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text mono size="caption" dimColor wrap="clip" maxLines={1}>
+            {'░'.repeat(RUN)}
+          </Text>
+        </Box>
+      )
+      // The glow starts at 0-75% of the row, so its 5 glyphs fit whole on rows of 20+ columns.
+      const at = (Math.floor(elapsedMs / 1000) * 7) % 76
+      const bars =
+        frac === null
+          ? [run('before', '░', null, { width: `${at}%` }), piece('glow', '▒▓█▓▒', fillColor), track('after')]
+          : frac >= 1
+            ? [run('fill', '█', fillColor, { flexGrow: 1, flexShrink: 1, minWidth: 0 })]
+            : // The fill may shrink a little, so the ▓▒ edge always fits whole near 100%.
+              [run('fill', '█', fillColor, { width: share(frac), flexShrink: 1, minWidth: 0 }), piece('edge', '▓▒', fillColor), track('rest')]
       const t = (key: string, text: string, props: Record<string, string | boolean>) => (
         <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
           {text}
@@ -315,7 +352,7 @@ export const register: Register = on => {
         right.push(t('verdict', v.text, { color: v.color, weight: 'bold' }))
       }
       return (
-        <Box flexDirection="column" rowGap="xs">
+        <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
             <Box flexShrink={0}>
               <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
@@ -331,18 +368,8 @@ export const register: Register = on => {
               {right}
             </Box>
           </Box>
-          <Box key="bar" flexDirection="row" flexWrap="nowrap" justifyContent="space-between" overflow="hidden">
-            {lit.map((isLit, i) =>
-              isLit ? (
-                <Text key={`b${i}`} color={fillColor} wrap="clip">
-                  ■
-                </Text>
-              ) : (
-                <Text key={`b${i}`} color="inactive" wrap="clip">
-                  ■
-                </Text>
-              ),
-            )}
+          <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden">
+            {bars}
           </Box>
         </Box>
       )

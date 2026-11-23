@@ -78,14 +78,13 @@ const live = (id: string, usd: number | undefined, startTime: number) => ({
   ...(usd === undefined ? {} : { cost: { usd } }),
 })
 
-const paneTexts = async ($: Parameters<Parameters<typeof test>[1]>[0], surface: 'desktop' | 'terminal') => {
-  const ui = await $.ui.mount({ ...PANE, surface })
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
-  await ui.unmount()
-  return texts
-}
-
 test("over the room for cards, a '+N more active' line counts the rest", async ($, on) => {
+  const paneTexts = async (surface: 'desktop' | 'terminal') => {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    await ui.unmount()
+    return texts
+  }
   const now = Date.now()
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -94,7 +93,7 @@ test("over the room for cards, a '+N more active' line counts the rest", async (
   on('agent.list', () => ({ value: Array.from({ length: 8 }, (_, i) => live(`a${i}`, 0.5, now - i * 1000)) as never }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   for (const surface of ['desktop', 'terminal'] as const) {
-    const texts = await paneTexts($, surface)
+    const texts = await paneTexts(surface)
     expect(texts.join('\n')).toContain('8 running · 0 finished')
     expect(texts.map(t => t.trim())).toContain('+2 more active')
     // The newest 6 get cards; the 2 oldest are in the count only.
@@ -104,6 +103,12 @@ test("over the room for cards, a '+N more active' line counts the rest", async (
 })
 
 test("no '+' after the total before any agent has a cost; a '+' when some have none yet", async ($, on) => {
+  const paneTexts = async (surface: 'desktop' | 'terminal') => {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    await ui.unmount()
+    return texts
+  }
   const now = Date.now()
   let agents = [live('a1', undefined, now), live('a2', undefined, now - 1000)]
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -115,11 +120,11 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
     // The header total is the text right after the "N running · M finished" text.
     const total = (texts: string[]) => texts[texts.findIndex(t => /running ·/.test(t)) + 1]
     agents = [live('a1', undefined, now), live('a2', undefined, now - 1000)]
-    expect(total(await paneTexts($, surface))).toBe('$–')
+    expect(total(await paneTexts(surface))).toBe('$–')
     agents = [live('a1', 1.234, now), live('a2', undefined, now - 1000)]
-    expect(total(await paneTexts($, surface))).toBe('$1.23+')
+    expect(total(await paneTexts(surface))).toBe('$1.23+')
     agents = [live('a1', 1.234, now), live('a2', 0.5, now - 1000)]
-    expect(total(await paneTexts($, surface))).toBe('$1.73')
+    expect(total(await paneTexts(surface))).toBe('$1.73')
   }
 })
 
