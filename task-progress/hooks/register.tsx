@@ -1,18 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Plan, Progress, TaskList, TurnRecord } from '../types'
+import type { Plan, Progress, TaskList, TaskStatus, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
 const progress = atom({ plugin: 'task-progress', key: 'progress' } as const, null, {
-  shape: 'progress-3',
+  shape: 'progress-4',
 })
-const tasks = atom(
-  { plugin: 'task-progress', key: 'tasks' } as const,
-  { total: 0, completedIds: [] },
-  { shape: 'tasks-1' },
-)
+const tasks = atom({ plugin: 'task-progress', key: 'tasks' } as const, [], { shape: 'tasks-2' })
 const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
 
@@ -24,14 +20,27 @@ const HISTORY_MAX = 300
 function describe(tool: string, input: Record<string, unknown>): string {
   const pick = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
   const detail =
-    pick('description') || pick('subject') || pick('file_path') || pick('pattern') || pick('command') || pick('url')
+    pick('description') ||
+    pick('subject') ||
+    pick('file_path') ||
+    pick('pattern') ||
+    pick('command') ||
+    pick('url')
   const short = detail.length > 50 ? `${detail.slice(0, 49)}…` : detail
   return short ? `${tool}: ${short}` : tool
 }
 
 function isRecord(x: unknown): x is TurnRecord {
   const r = x as TurnRecord
-  return typeof r === 'object' && r !== null && typeof r.ms === 'number' && typeof r.promptChars === 'number'
+  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+  return (
+    typeof r === 'object' &&
+    r !== null &&
+    num(r.ms) &&
+    r.ms >= 0 &&
+    num(r.promptChars) &&
+    (r.predictedMs === null || num(r.predictedMs))
+  )
 }
 
 async function loadHistory($: EngineInterface): Promise<TurnRecord[]> {
@@ -44,37 +53,76 @@ async function patch($: EngineInterface, fn: (p: Progress) => Progress): Promise
   await update($, progress, p => (p === null ? p : fn(p)))
 }
 
-// Update the task list from a task tool's arguments.
-async function track($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<void> {
-  if (tool === 'TodoWrite' && Array.isArray(args.todos)) {
-    const todos = args.todos as { status?: string }[]
-    const done = todos.map((t, i) => (t.status === 'completed' ? `todo-${i}` : '')).filter(Boolean)
-    await update($, tasks, () => ({ total: todos.length, completedIds: done }))
-  } else if (tool === 'TaskCreate') {
-    // A new task after a finished list starts a new list.
-    await update($, tasks, l =>
-      l.total > 0 && l.completedIds.length >= l.total
-        ? { total: 1, completedIds: [] }
-        : { ...l, total: l.total + 1 },
-    )
-  } else if (tool === 'TaskUpdate' && typeof args.taskId === 'string') {
-    const id = args.taskId
-    if (args.status === 'completed') {
-      await update($, tasks, l =>
-        l.completedIds.includes(id) ? l : { ...l, completedIds: [...l.completedIds, id] },
-      )
-    } else if (args.status === 'deleted') {
-      await update($, tasks, l => ({
-        total: Math.max(0, l.total - 1),
-        completedIds: l.completedIds.filter(x => x !== id),
-      }))
-    }
-  }
+const STATUSES: readonly string[] = ['pending', 'in_progress', 'completed']
+
+function failed(result: unknown): boolean {
+  const r = result as { deny?: string; isError?: boolean }
+  return r.deny !== undefined || r.isError === true
 }
 
-function planOf(list: TaskList, doneAtStart: number): Plan {
-  const done = Math.min(list.completedIds.length, list.total)
-  return { total: list.total, done, doneThisTurn: Math.max(0, done - doneAtStart) }
+// Note which tasks became completed (or stopped being completed) during this turn.
+async function noteTurn($: EngineInterface, before: TaskList, after: TaskList): Promise<void> {
+  const was = new Set(before.filter(t => t.status === 'completed').map(t => t.id))
+  const now = new Set(after.filter(t => t.status === 'completed').map(t => t.id))
+  await patch($, p => {
+    const kept = p.completedInTurn.filter(id => now.has(id))
+    const added = [...now].filter(id => !was.has(id) && !kept.includes(id))
+    return { ...p, completedInTurn: [...kept, ...added] }
+  })
+}
+
+// Update the task list from a task tool call that worked, using its result.
+async function track(
+  $: EngineInterface,
+  tool: string,
+  args: Record<string, unknown>,
+  ran: unknown,
+): Promise<void> {
+  if (failed(ran)) return
+  const result = (ran as { result?: unknown }).result as Record<string, unknown> | undefined
+  const before = await read($, tasks)
+  let after: TaskList | undefined
+
+  if (tool === 'TodoWrite') {
+    const todos = (Array.isArray(result?.newTodos) ? result.newTodos : args.todos) as
+      | { content?: string; status?: string }[]
+      | undefined
+    if (!Array.isArray(todos)) return
+    after = todos.map((t, i) => ({
+      id: `todo:${t.content ?? i}`,
+      status: (STATUSES.includes(t.status ?? '') ? t.status : 'pending') as TaskStatus,
+    }))
+  } else if (tool === 'TaskCreate') {
+    const task = result?.task as { id?: unknown } | undefined
+    const id = typeof task?.id === 'string' ? task.id : `new-${before.length + 1}`
+    // A new task after a finished list starts a new list.
+    const isFinished = before.length > 0 && before.every(t => t.status === 'completed')
+    after = [...(isFinished ? [] : before.filter(t => t.id !== id)), { id, status: 'pending' }]
+  } else if (tool === 'TaskUpdate' && typeof args.taskId === 'string') {
+    if (result?.success === false) return
+    const id = args.taskId
+    const status = args.status
+    if (status === 'deleted') {
+      after = before.filter(t => t.id !== id)
+    } else if (typeof status === 'string' && STATUSES.includes(status)) {
+      const entry = { id, status: status as TaskStatus }
+      after = before.some(t => t.id === id) ? before.map(t => (t.id === id ? entry : t)) : [...before, entry]
+    }
+  }
+
+  if (after === undefined) return
+  await update($, tasks, () => after)
+  await noteTurn($, before, after)
+}
+
+function planOf(list: TaskList, completedInTurn: readonly string[]): Plan {
+  const done = list.filter(t => t.status === 'completed')
+  const ids = new Set(done.map(t => t.id))
+  return {
+    total: list.length,
+    done: done.length,
+    doneThisTurn: completedInTurn.filter(id => ids.has(id)).length,
+  }
 }
 
 // Moves the elapsed time once a second while a turn runs.
@@ -104,13 +152,15 @@ export const register: Register = on => {
       name: 'progress-stats',
       description: 'Show how accurate the time-left estimate is',
     })
-    history = await loadHistory($)
-    // After a reload in the middle of a turn, start the clock again.
-    const p = await read($, progress)
-    if (p?.isRunning) {
-      ticker?.cancel()
-      ticker = await startTicker($)
-    }
+    try {
+      history = await loadHistory($)
+      // After a reload in the middle of a turn, start the clock again.
+      const p = await read($, progress)
+      if (p?.isRunning) {
+        ticker?.cancel()
+        ticker = await startTicker($)
+      }
+    } catch {}
     return next(e)
   })
 
@@ -138,25 +188,25 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    const t = await $.clock.now()
-    const list = await read($, tasks)
-    const doneAtStart = planOf(list, 0).done
-    const first = estimate(history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
-    await update($, now, () => t)
-    await update($, progress, () => ({
-      isRunning: true,
-      startedAt: t,
-      endedAt: 0,
-      steps: 0,
-      tools: 0,
-      current: 'Thinking',
-      outcome: '',
-      promptChars: e.text.length,
-      predictedMs: first.kind === 'eta' ? first.leftMs : null,
-      doneAtStart,
-    }))
-    ticker?.cancel()
-    ticker = await startTicker($)
+    try {
+      const t = await $.clock.now()
+      const first = estimate(history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
+      await update($, now, () => t)
+      await update($, progress, () => ({
+        isRunning: true,
+        startedAt: t,
+        endedAt: 0,
+        steps: 0,
+        tools: 0,
+        current: 'Thinking',
+        outcome: '',
+        promptChars: e.text.length,
+        predictedMs: first.kind === 'eta' ? first.leftMs : null,
+        completedInTurn: [],
+      }))
+      ticker?.cancel()
+      ticker = await startTicker($)
+    } catch {}
     return next(e)
   })
 
@@ -169,16 +219,21 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     // Observe only: a failure here must never stop the tool.
+    const args = e as unknown as Record<string, unknown>
     try {
-      const args = e as unknown as Record<string, unknown>
-      // Subagents write the session's task list too.
-      await track($, e.tool, args)
       if (e.agentId === undefined) {
         const label = describe(e.tool, args)
         await patch($, p => ({ ...p, tools: p.tools + 1, current: label }))
       }
     } catch {}
-    return next(e)
+    const ran = await next(e)
+    try {
+      // Subagents write the session's task list too.
+      if (e.tool === 'TaskCreate' || e.tool === 'TaskUpdate' || e.tool === 'TodoWrite') {
+        await track($, e.tool, args, ran)
+      }
+    } catch {}
+    return ran
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -233,7 +288,7 @@ export const register: Register = on => {
       )
     }
 
-    const plan = planOf(await read($, tasks), p.doneAtStart)
+    const plan = planOf(await read($, tasks), p.completedInTurn)
     const est = estimate(history, p.promptChars, elapsedMs, plan)
     const eta =
       est.kind === 'eta'
@@ -253,7 +308,8 @@ export const register: Register = on => {
         <Text color={est.kind === 'over' ? 'yellow' : 'cyan'}> {eta}</Text>
         <Text> {p.current}</Text>
         <Text dimColor>
-          {' '}· {counts}
+          {' '}
+          · {counts}
           {step}
           {subagents > 0 ? ` · ${subagents} subagents running` : ''}
         </Text>

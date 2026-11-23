@@ -5,11 +5,11 @@ export type Plan = {
   doneThisTurn: number
 }
 
-// The session's task list, as the TaskCreate, TaskUpdate and TodoWrite calls built it.
-export type TaskList = {
-  total: number
-  completedIds: string[]
-}
+export type TaskStatus = 'pending' | 'in_progress' | 'completed'
+
+// The session's task list, as the TaskCreate, TaskUpdate and TodoWrite calls that worked built it.
+export type TaskEntry = { id: string; status: TaskStatus }
+export type TaskList = TaskEntry[]
 
 export type Progress = {
   isRunning: boolean
@@ -21,7 +21,8 @@ export type Progress = {
   outcome: string
   promptChars: number
   predictedMs: number | null
-  doneAtStart: number
+  // Tasks that became completed during this turn.
+  completedInTurn: string[]
 }
 
 // One finished main-loop turn. No prompt text: only its length.

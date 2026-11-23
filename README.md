@@ -32,6 +32,8 @@ Plugins that you install once with the "user" scope work in the terminal, in des
 
 ### In a terminal (outside Claude Code)
 
+This needs the separate Claude Code command-line tool. The desktop app does not add the `claude` command to PowerShell or to a terminal. If PowerShell says that `claude` is not a cmdlet, use the desktop app steps above, or install the command-line tool first (see the setup page of the Claude Code docs).
+
 1. Type this command and push Enter. You see that the marketplace `archimedes-plugins` is added.
 
 ```bash
