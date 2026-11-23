@@ -162,6 +162,15 @@ export const register: Register = on => {
     return result
   })
 
+  // The last turn's timer can be lost when the session ends right after it: write once more, directly.
+  on('session.end', async ($, e, next) => {
+    try {
+      saveCost($)
+      await writes.last
+    } catch {}
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, tick)
     const l = await read($, ledger)

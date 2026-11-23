@@ -232,8 +232,9 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
     usage: { model: 'claude-opus-5-5', input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 },
   } as never)
   // The write runs from a timer, after the turn end: wait for it (each $ call is one round trip).
-  const settle = async () => {
-    for (let i = 0; i < 5; i++) await paneTexts($, 'desktop')
+  // Wait until the file is there (or, when none is due, a fixed number of round trips).
+  const settle = async (isDue = true) => {
+    for (let i = 0; i < 20 && (!isDue || files.size === 0); i++) await paneTexts($, 'desktop')
   }
   await settle()
   const text = files.get('/home/t/.claude/token-log/cost/sess-1.json')
@@ -257,7 +258,7 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
   files.clear()
   env.TOKEN_LOG = 'off'
   await $.turn.complete({ turnId: 'm3', ...DONE } as never)
-  await settle()
+  await settle(false)
   expect(files.size).toBe(0)
   sessionUsd = 0
 })
