@@ -3,15 +3,15 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, stats } from './eta'
-import { apply, applyChange, completedChange } from './tasks'
+import { activeTitle, apply, applyChange, completedChange } from './tasks'
 import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
 const progress = atom({ plugin: 'task-progress', key: 'progress' } as const, null, {
-  shape: 'progress-4',
+  shape: 'progress-5',
 })
-const tasks = atom({ plugin: 'task-progress', key: 'tasks' } as const, [], { shape: 'tasks-2' })
+const tasks = atom({ plugin: 'task-progress', key: 'tasks' } as const, [], { shape: 'tasks-3' })
 const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
 
@@ -32,6 +32,20 @@ function describe(tool: string, input: Record<string, unknown>): string {
     pick('url')
   const short = detail.length > 50 ? `${detail.slice(0, 49)}…` : detail
   return short ? `${tool}: ${short}` : tool
+}
+
+// Asks a small model what the turn's prompt is for, in a few words. The prompt text goes only into this
+// call; the answer stays in session state and never in the turn history.
+const GOAL_SYSTEM =
+  "You label what a person's request to a coding assistant is for. Reply with only the goal as a short phrase " +
+  'of 3 to 7 words in sentence case: the intent, not the steps (for example "Polish the subagents pane" or ' +
+  '"Find why the login test fails"). No quotes, no period, nothing else.'
+const MIN_GOAL_PROMPT = 12
+
+export function cleanGoal(text: string): string {
+  const line = (text.split('\n').find(l => l.trim() !== '') ?? '').trim()
+  const bare = line.replace(/^(goal:\s*)/i, '').replace(/^["'`*]+|["'`*.]+$/g, '').trim()
+  return bare.length > 60 ? `${bare.slice(0, 59)}…` : bare
 }
 
 function isRecord(x: unknown): x is TurnRecord {
@@ -107,6 +121,27 @@ function pct(x: number | null): string {
   return x === null ? 'n/a' : `${Math.round(x * 100)}%`
 }
 
+// The goal call of the latest turn, so a new turn cuts an older one.
+const goalCall: { now?: { cancel: () => void; stop: AbortController } } = {}
+
+// From a timer, so the turn never waits for it. A late answer for an older turn is dropped.
+async function askGoal($: EngineInterface, turnId: string, text: string): Promise<void> {
+  goalCall.now?.cancel()
+  goalCall.now?.stop.abort()
+  const stop = new AbortController()
+  const timer = await $.clock.after(10, async () => {
+    try {
+      const r = await $.model.complete(
+        { model: 'haiku', system: GOAL_SYSTEM, prompt: text.slice(0, 4000), maxTokens: 40, effort: 'low', timeoutMs: 15000 },
+        { signal: stop.signal },
+      )
+      const goal = r.isAnswered ? cleanGoal(r.text) : ''
+      if (goal !== '') await patch($, p => (p.turnId === turnId ? { ...p, goal } : p))
+    } catch {}
+  })
+  goalCall.now = { cancel: timer.cancel, stop }
+}
+
 export const register: Register = on => {
   let ticker: { cancel: () => void } | undefined
   let history: TurnRecord[] = []
@@ -156,14 +191,18 @@ export const register: Register = on => {
     try {
       const t = await $.clock.now()
       const first = estimate(history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
+      const isShort = e.text.trim().length < MIN_GOAL_PROMPT
       await update($, now, () => t)
-      await update($, progress, () => ({
+      await update($, progress, before => ({
         isRunning: true,
         startedAt: t,
         endedAt: 0,
         steps: 0,
         tools: 0,
-        current: 'Thinking',
+        current: '',
+        // A short reply ("yes", "go on") keeps the goal it continues.
+        goal: isShort ? (before?.goal ?? '') : '',
+        turnId: e.turnId,
         outcome: '',
         promptChars: e.text.length,
         predictedMs: first.kind === 'eta' ? first.leftMs : null,
@@ -171,13 +210,15 @@ export const register: Register = on => {
       }))
       ticker?.cancel()
       ticker = await startTicker($)
+      if (!isShort) await askGoal($, e.turnId, e.text)
     } catch {}
     return next(e)
   })
 
   on('turn.step', async function* ($, e, next) {
     if (e.agentId === undefined) {
-      await patch($, p => ({ ...p, steps: p.steps + 1, current: 'Thinking' }))
+      // Between tools nothing runs: the band shows the goal alone, not the word "Thinking".
+      await patch($, p => ({ ...p, steps: p.steps + 1, current: '' }))
     }
     return yield* next(e)
   })
@@ -205,6 +246,7 @@ export const register: Register = on => {
     if (e.agentId !== undefined) return next(e)
     ticker?.cancel()
     ticker = undefined
+    // The goal call is left to finish: a short turn still shows what it was for.
     try {
       const t = await $.clock.now()
       const outcome = { answer: 'Done', aborted: 'Stopped', refusal: 'Refused', error: 'Error' }[e.reason]
@@ -236,7 +278,11 @@ export const register: Register = on => {
     const isTwoRows = e.props.maxRows >= 2
     const t = p.isRunning ? await read($, now) : p.endedAt
     const elapsedMs = Math.max(0, t - p.startedAt)
-    const plan = planOf(await read($, tasks), p.completedInTurn)
+    const taskList = await read($, tasks)
+    const plan = planOf(taskList, p.completedInTurn)
+    // What the turn is for: the task in progress, else the model's summary of the prompt.
+    const goal = activeTitle(taskList) || p.goal
+    const doing = p.isRunning ? p.current : ''
     // Read live, so background subagents from an earlier turn count too.
     const subagents = p.isRunning
       ? (await $.agent.list()).filter(a => a.kind === 'local_agent' && a.status === 'running').length
@@ -287,7 +333,8 @@ export const register: Register = on => {
       }
     }
     const pct = p.isRunning && frac !== null && frac < 1 ? ` ${Math.round(frac * 100)}%` : ''
-    const current = p.isRunning ? ` ${p.current}` : ''
+    // One line for the terminal: the goal, then what runs now.
+    const current = ` ${[goal, doing].filter(x => x !== '').join(' · ')}`.trimEnd()
     const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
 
     // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
@@ -359,10 +406,21 @@ export const register: Register = on => {
                 {head}
               </Text>
             </Box>
-            <Box flexGrow={1} flexShrink={1} minWidth={0}>
-              <Text wrap="end" maxLines={1}>
-                {current.trim()}
-              </Text>
+            <Box flexGrow={1} flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap" columnGap={1}>
+              {goal !== '' && (
+                <Box key="goal" flexShrink={1} minWidth={0}>
+                  <Text weight="semibold" wrap="end" maxLines={1} {...(p.isRunning ? {} : { dimColor: true })}>
+                    {goal}
+                  </Text>
+                </Box>
+              )}
+              {doing !== '' && (
+                <Box key="doing" flexShrink={4} minWidth={0}>
+                  <Text dimColor wrap="end" maxLines={1}>
+                    {goal !== '' ? `· ${doing}` : doing}
+                  </Text>
+                </Box>
+              )}
             </Box>
             <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0}>
               {right}

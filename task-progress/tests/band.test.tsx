@@ -235,3 +235,57 @@ test('todos with the same text stay separate tasks', async ($, on) => {
   // 10 s per task, 2 left: 20 s.
   expect((await band($)).eta).toBe('~20s left (by tasks)')
 })
+
+test('the band shows the goal, not "Thinking": the model summary, then the task in progress', async ($, on) => {
+  const asked: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.step', async function* () {
+    return { stop: 'end_turn' } as never
+  })
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', (_, e) => ({ result: e.tool === 'TaskCreate' ? { task: { id: '1' } } : { success: true } }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 0 }))
+  on('agent.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('model.complete', (_, e) => {
+    asked.push(e.prompt)
+    return { value: { isAnswered: true, text: '"Polish the subagents pane."\n', usage: {} } as never }
+  })
+  const texts = async (surface: 'desktop' | 'terminal') => {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join(' | ')
+    await ui.unmount()
+    return all
+  }
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'make the subagents pane show all totals', turnId: 't1' })
+  expect(asked).toEqual(['make the subagents pane show all totals'])
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const all = await texts(surface)
+    expect(all).toContain('Polish the subagents pane')
+    expect(all).not.toContain('Thinking')
+  }
+
+  // A running tool shows after the goal, dimmed on desktop.
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
+  expect(await texts('desktop')).toContain('· Bash: Run tests')
+  expect(await texts('terminal')).toContain('Polish the subagents pane · Bash: Run tests')
+
+  // A task in progress names the goal instead.
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Fix totals', description: 'x', activeForm: 'Fixing the totals' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  expect(await texts('desktop')).toContain('Fixing the totals')
+
+  // A short reply keeps the goal and asks no model.
+  await $.turn.complete({ turnId: 't1', reason: 'answer', answer: '', durationMs: 1000, isAborted: false })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.turn.start({ text: 'yes', turnId: 't2' })
+  expect(asked.length).toBe(1)
+  expect(await texts('desktop')).toContain('Polish the subagents pane')
+})

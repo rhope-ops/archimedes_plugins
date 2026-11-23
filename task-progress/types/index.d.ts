@@ -8,7 +8,8 @@ export type Plan = {
 export type TaskStatus = 'pending' | 'in_progress' | 'completed'
 
 // The session's task list, as the TaskCreate, TaskUpdate and TodoWrite calls that worked built it.
-export type TaskEntry = { id: string; status: TaskStatus }
+// `title` is what the task is for: its activeForm, else its subject (or a todo's content).
+export type TaskEntry = { id: string; status: TaskStatus; title: string }
 export type TaskList = TaskEntry[]
 
 export type Progress = {
@@ -18,6 +19,10 @@ export type Progress = {
   steps: number
   tools: number
   current: string
+  // What this turn is for, in a few words: from the in-progress task, else a short model summary of
+  // the prompt. Empty until known. Kept for this session only, never in the turn history.
+  goal: string
+  turnId: string
   outcome: string
   promptChars: number
   predictedMs: number | null

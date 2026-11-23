@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { tokensText } from '../hooks/pricing'
+import { sync, tokensText, typeColor } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -7,6 +7,8 @@ const PANE = {
   requestId: 'agents-pane',
   props: { title: 'Subagents', isFocused: false, bodyColumns: 50, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
+
+const DONE = { reason: 'answer', answer: '', durationMs: 1000, isAborted: false } as const
 
 const usage = (model: string, input: number, output: number) => ({
   model,
@@ -16,59 +18,15 @@ const usage = (model: string, input: number, output: number) => ({
   cache_creation_input_tokens: 500,
 })
 
-test('cards show the /cost estimate and the tokens; running first', async ($, on) => {
-  const now = Date.now()
-  const agent = (id: string, status: string, usd: number, description: string) => ({
-    id,
-    description,
-    type: 'worker',
-    status,
-    kind: 'local_agent',
-    taskStatus: status === 'running' ? 'running' : 'completed',
-    label: status === 'running' ? 'Editing scripts/token_log.py' : description,
-    startTime: now - 95_000,
-    cwd: '/',
-    model: 'claude-sonnet-5-5',
-    tokenCount: 0,
-    tokenSamples: [],
-    usage: [usage('claude-sonnet-5-5', 2000, 3000)],
-    cost: { usd },
-  })
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('clock.every', () => ({ value: undefined }))
-  on('agent.list', () => ({
-    // Sample agents: only the fields the pane reads.
-    value: [agent('a1', 'completed', 0.004, 'Find files'), agent('a2', 'running', 1.234, 'Fix token log')] as never,
-  }))
-
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  for (const surface of ['desktop', 'terminal'] as const) {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join('\n')
-    expect(texts).toContain('1 running · 1 finished')
-    // The total is the sum of the /cost estimates: 1.234 + 0.004.
-    expect(texts).toContain('$1.24')
-    expect(texts).toContain('$1.23')
-    expect(texts).toContain('<$0.01')
-    // 2,000 + 3,000 + 1,000 + 500 tokens per agent.
-    expect(texts).toContain('6.5k tok')
-    expect(texts).toContain('Editing scripts/token_log.py')
-    expect(texts).toContain('estimate, as /cost')
-    expect(texts.indexOf('Fix token log')).toBeLessThan(texts.indexOf('Find files'))
-    await ui.unmount()
-  }
-})
-
-// A sample running agent with only the fields the pane reads; `usd` undefined means no cost yet.
-const live = (id: string, usd: number | undefined, startTime: number) => ({
+// A sample agent with only the fields the pane reads; `usd` undefined means no cost yet.
+const agent = (id: string, status: string, usd: number | undefined, startTime: number, type = 'worker') => ({
   id,
   description: `Task ${id}`,
-  type: 'worker',
-  status: 'running',
+  type,
+  status,
   kind: 'local_agent',
-  taskStatus: 'running',
-  label: `Task ${id}`,
+  taskStatus: status === 'running' ? 'running' : 'completed',
+  label: status === 'running' ? `Editing ${id}.py` : `Task ${id}`,
   startTime,
   cwd: '/',
   model: 'claude-sonnet-5-5',
@@ -78,54 +36,123 @@ const live = (id: string, usd: number | undefined, startTime: number) => ({
   ...(usd === undefined ? {} : { cost: { usd } }),
 })
 
-test("over the room for cards, a '+N more active' line counts the rest", async ($, on) => {
-  const paneTexts = async (surface: 'desktop' | 'terminal') => {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
-    await ui.unmount()
-    return texts
-  }
-  const now = Date.now()
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
+async function setup($: any, on: any, list: () => unknown[]) {
+  on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('clock.every', () => ({ value: undefined }))
-  // 8 running agents; the default view (30 rows) has room for 6 cards.
-  on('agent.list', () => ({ value: Array.from({ length: 8 }, (_, i) => live(`a${i}`, 0.5, now - i * 1000)) as never }))
+  on('turn.complete', () => ({ text: '' }))
+  on('agent.list', () => ({ value: list() as never }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+}
+
+// A subagent's turn end makes the pane read the live list into its ledger.
+const poke = ($: any) => $.turn.complete({ turnId: 'x', agentId: 'a1', ...DONE })
+
+async function paneTexts($: any, surface: 'desktop' | 'terminal'): Promise<string[]> {
+  const ui = await $.ui.mount({ ...PANE, surface })
+  const texts = (await ui.findAll({ type: 'Text' })).map((t: { text?: string }) => t.text ?? '')
+  await ui.unmount()
+  return texts
+}
+
+test('totals, token split, per-type rows and a card for each agent; live first', async ($, on) => {
+  const now = Date.now()
+  await setup($, on, () => [agent('a1', 'completed', 0.004, now - 95_000, 'Explore'), agent('a2', 'running', 1.234, now - 95_000)])
+  await poke($)
   for (const surface of ['desktop', 'terminal'] as const) {
-    const texts = await paneTexts(surface)
-    expect(texts.join('\n')).toContain('8 running · 0 finished')
-    expect(texts.map(t => t.trim())).toContain('+2 more active')
-    // The newest 6 get cards; the 2 oldest are in the count only.
-    expect(texts).toContain('Task a5')
-    expect(texts).not.toContain('Task a6')
+    const texts = await paneTexts($, surface)
+    const all = texts.join('\n')
+    expect(all).toContain('2 subagents')
+    expect(all).toContain('1 running · 1 done')
+    // The total is the sum of the /cost estimates: 1.234 + 0.004.
+    expect(texts).toContain('$1.24')
+    expect(all).toContain('$1.23')
+    expect(all).toContain('<$0.01')
+    // 2,000 + 3,000 + 1,000 + 500 tokens per agent; 13k in all.
+    expect(all).toContain('6.5k tok · in 2.0k · out 3.0k · cache 1.0kr / 500w')
+    expect(texts).toContain('13.0k')
+    expect(texts).toContain('4.0k · 6.0k')
+    expect(texts).toContain('2.0k · 1.0k')
+    // One row per type, with its count.
+    expect(texts).toContain('Explore')
+    expect(texts).toContain('worker')
+    expect(all).toContain('Editing a2.py')
+    expect(all).toContain('estimate, as /cost')
+    expect(all.indexOf('ACTIVE · 1')).toBeLessThan(all.indexOf('FINISHED · 1'))
+    expect(all.indexOf('Task a2')).toBeLessThan(all.indexOf('Task a1'))
   }
 })
 
-test("no '+' after the total before any agent has a cost; a '+' when some have none yet", async ($, on) => {
-  const paneTexts = async (surface: 'desktop' | 'terminal') => {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
-    await ui.unmount()
-    return texts
-  }
+test('every agent gets a card; nothing is cut at the view height', async ($, on) => {
   const now = Date.now()
-  let agents = [live('a1', undefined, now), live('a2', undefined, now - 1000)]
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('clock.every', () => ({ value: undefined }))
-  on('agent.list', () => ({ value: agents as never }))
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await setup($, on, () => Array.from({ length: 8 }, (_, i) => agent(`a${i}`, 'running', 0.5, now - i * 1000)))
+  await poke($)
   for (const surface of ['desktop', 'terminal'] as const) {
-    // The header total is the text right after the "N running · M finished" text.
-    const total = (texts: string[]) => texts[texts.findIndex(t => /running ·/.test(t)) + 1]
-    agents = [live('a1', undefined, now), live('a2', undefined, now - 1000)]
-    expect(total(await paneTexts(surface))).toBe('$–')
-    agents = [live('a1', 1.234, now), live('a2', undefined, now - 1000)]
-    expect(total(await paneTexts(surface))).toBe('$1.23+')
-    agents = [live('a1', 1.234, now), live('a2', 0.5, now - 1000)]
-    expect(total(await paneTexts(surface))).toBe('$1.73')
+    const texts = await paneTexts($, surface)
+    expect(texts.join('\n')).toContain('8 running · 0 done')
+    for (let i = 0; i < 8; i++) expect(texts).toContain(`Task a${i}`)
+    expect(texts).toContain('$4.00')
   }
+})
+
+test('an agent Claude Code drops from its list stays in the totals', async ($, on) => {
+  const now = Date.now()
+  let list = [agent('a1', 'completed', 0.75, now - 60_000), agent('a2', 'running', 0.25, now - 10_000)]
+  await setup($, on, () => list)
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('$1.00')
+  // The engine drops a1 a while after it ends.
+  list = [agent('a2', 'completed', 0.5, now - 10_000)]
+  await poke($)
+  const texts = await paneTexts($, 'desktop')
+  expect(texts).toContain('$1.25')
+  expect(texts).toContain('Task a1')
+  expect(texts.join('\n')).toContain('2 done')
+})
+
+test("no '+' after the total before any agent has a cost; a '+' when some have none yet", async ($, on) => {
+  const now = Date.now()
+  let list = [agent('a1', 'running', undefined, now), agent('a2', 'running', undefined, now - 1000)]
+  await setup($, on, () => list)
+  const total = async (surface: 'desktop' | 'terminal') => {
+    await poke($)
+    const texts = await paneTexts($, surface)
+    // The header total is the text right after the "N subagents" text.
+    return texts[texts.findIndex(t => /subagents$/.test(t)) + 1]
+  }
+  for (const surface of ['desktop', 'terminal'] as const) {
+    list = [agent('a1', 'running', undefined, now), agent('a2', 'running', undefined, now - 1000)]
+    expect(await total(surface)).toBe('$–')
+  }
+  list = [agent('a1', 'running', 1.234, now), agent('a2', 'running', undefined, now - 1000)]
+  expect(await total('desktop')).toBe('$1.23+')
+  list = [agent('a1', 'running', 1.234, now), agent('a2', 'running', 0.5, now - 1000)]
+  expect(await total('desktop')).toBe('$1.73')
+})
+
+test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
+  const empty = { types: [], order: [], agents: {} }
+  const snap = (id: string, type: string, status: string, out: number) => ({
+    id,
+    description: id,
+    type,
+    model: null,
+    status,
+    label: id,
+    startTime: 1,
+    endTime: null,
+    tokens: { input: 0, output: out, cacheRead: 0, cacheWrite: 0 },
+    usd: null,
+  })
+  const a = sync(empty, [snap('x', 'Explore', 'running', 10), snap('y', 'Plan', 'running', 5)], 100)
+  expect(a.types).toEqual(['Explore', 'Plan'])
+  expect(sync(a, [snap('x', 'Explore', 'running', 10), snap('y', 'Plan', 'running', 5)], 200)).toBe(a)
+  const b = sync(a, [snap('x', 'Explore', 'completed', 4)], 300)
+  expect(b.agents.x?.endTime).toBe(300)
+  expect(b.agents.x?.tokens.output).toBe(10)
+  expect(sync(b, [snap('x', 'Explore', 'completed', 10)], 400).agents.x?.endTime).toBe(300)
+  expect(typeColor(0, false)).not.toBe(typeColor(1, false))
+  expect(typeColor(8, true)).toBe(typeColor(0, true))
 })
 
 test('helpers: token rounding', async () => {
