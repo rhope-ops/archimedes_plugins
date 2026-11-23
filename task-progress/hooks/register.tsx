@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, relError, stats } from './eta'
 import { apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, fit, gap, sweep } from './view'
+import { SPIN, bar, row1 as fitRow1, row2 as fitRow2, sweep } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
@@ -98,7 +98,8 @@ async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> 
 
 function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  const mmss = `${String(Math.floor(s / 60) % 60).padStart(s >= 3600 ? 2 : 1, '0')}:${String(s % 60).padStart(2, '0')}`
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss}` : mmss
 }
 
 function pct(x: number | null): string {
@@ -230,8 +231,8 @@ export const register: Register = on => {
     if (p === null || e.props.hasSurvey || (await read($, isHidden))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
-    const width = Math.max(40, e.props.bodyColumns ?? 80)
-    const isTwoRows = (e.props.maxRows ?? 2) >= 2
+    const width = Math.max(0, e.props.bodyColumns)
+    const isTwoRows = e.props.maxRows >= 2
     const t = p.isRunning ? await read($, now) : p.endedAt
     const elapsedMs = Math.max(0, t - p.startedAt)
     const plan = planOf(await read($, tasks), p.completedInTurn)
@@ -250,16 +251,17 @@ export const register: Register = on => {
     let head: string
     let headColor: string
     let tail: string
+    let shortTail: string
     let tailColor: string
     let frac: number | null
     if (!p.isRunning) {
       const isDone = p.outcome === 'Done'
       head = `● ${p.outcome} ${clock(elapsedMs)}`
       headColor = isDone ? 'green' : 'yellow'
-      tail =
-        p.predictedMs !== null && isDone
-          ? ` estimate was ${duration(p.predictedMs)} (off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%)`
-          : ''
+      const off = p.predictedMs === null ? 0 : Math.round(relError(p.predictedMs, elapsedMs) * 100)
+      const has = p.predictedMs !== null && isDone
+      tail = has ? ` estimate was ${duration(p.predictedMs ?? 0)} (off ${off}%)` : ''
+      shortTail = has ? ` off ${off}%` : ''
       tailColor = 'gray'
       frac = 1
     } else {
@@ -269,30 +271,90 @@ export const register: Register = on => {
       if (est.kind === 'eta') {
         frac = elapsedMs / Math.max(1, elapsedMs + est.leftMs)
         tail = ` ~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
+        shortTail = ` ~${duration(est.leftMs)}`
         tailColor = 'cyan'
       } else if (est.kind === 'over') {
         frac = 1
         tail = ' longer than usual'
+        shortTail = ' longer'
         tailColor = 'yellow'
       } else {
         frac = null
         tail = ` ETA learning ${est.samples}/${MIN_SAMPLES}`
+        shortTail = ` ${est.samples}/${MIN_SAMPLES}`
         tailColor = 'gray'
       }
     }
     const pct = p.isRunning && frac !== null && frac < 1 ? ` ${Math.round(frac * 100)}%` : ''
     const current = p.isRunning ? ` ${p.current}` : ''
-    // One row only: the tool name goes after the estimate and the bar gets shorter.
-    const inline = isTwoRows ? '' : fit(current, Math.floor(width / 3))
-    const barWidth = Math.max(8, width - head.length - pct.length - tail.length - inline.length - 1)
     const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
-    const filled = frac === null ? null : bar(barWidth, frac)
-    const moving = frac === null ? sweep(barWidth, Math.floor(elapsedMs / 1000)) : null
+
+    // Desktop, VS Code and phones: proportional fonts, so the app lays the row out.
+    // A native bar grows into the free room; each text stays on one line.
+    if (e.surface !== 'terminal') {
+      const Progress = $.ui.resolve(e).Progress
+      const drow1 = (
+        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={1}>
+          <Box flexShrink={0}>
+            <Text color={headColor} weight="bold" wrap="clip">
+              {head}
+            </Text>
+          </Box>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            {Progress !== undefined ? (
+              <Progress label="Turn progress" value={frac ?? undefined} valueText={pct.trim() || undefined} color={barColor} />
+            ) : (
+              <Text color={barColor} wrap="clip">
+                {'█'.repeat(20)}
+              </Text>
+            )}
+          </Box>
+          {pct !== '' && (
+            <Box flexShrink={0}>
+              <Text weight="bold" wrap="clip">
+                {pct.trim()}
+              </Text>
+            </Box>
+          )}
+          {tail !== '' && (
+            <Box flexShrink={1} minWidth={0}>
+              <Text color={tailColor} wrap="end" maxLines={1}>
+                {tail.trim()}
+              </Text>
+            </Box>
+          )}
+        </Box>
+      )
+      if (!isTwoRows) return drow1
+      return (
+        <Box flexDirection="column">
+          {drow1}
+          <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={2}>
+            <Box flexShrink={1} minWidth={0}>
+              <Text wrap="end" maxLines={1}>
+                {current.trim()}
+              </Text>
+            </Box>
+            <Box flexShrink={0}>
+              <Text dimColor wrap="clip">
+                {counts}
+              </Text>
+            </Box>
+          </Box>
+        </Box>
+      )
+    }
+
+    // Terminal: monospace cells, so the row is laid out to exactly the width.
+    // One row only: the tool name goes after the estimate and the bar gets shorter.
+    const r1 = fitRow1(width, head, pct, tail, shortTail, isTwoRows ? '' : current)
+    const filled = frac === null ? null : bar(r1.barWidth, frac)
+    const moving = frac === null ? sweep(r1.barWidth, Math.floor(elapsedMs / 1000)) : null
 
     const row1 = (
       <Box>
-        <Text color={headColor} bold>
-          {head}{' '}
+        <Text color={headColor} weight="bold" wrap="clip">
+          {r1.head}
         </Text>
         {filled !== null ? (
           <Text color={barColor}>{filled.fill}</Text>
@@ -305,23 +367,23 @@ export const register: Register = on => {
           <Text color="cyan">{moving?.glow ?? ''}</Text>
         )}
         {moving !== null && <Text dimColor>{moving.after}</Text>}
-        {pct !== '' && <Text bold>{pct}</Text>}
-        <Text color={tailColor}>{tail}</Text>
-        {inline !== '' && <Text>{inline}</Text>}
+        {r1.pct !== '' && <Text weight="bold">{r1.pct}</Text>}
+        {r1.tail !== '' && <Text color={tailColor}>{r1.tail}</Text>}
+        {r1.inline !== '' && <Text>{r1.inline}</Text>}
       </Box>
     )
     if (!isTwoRows) return row1
 
     // Row 2: what Claude does now on the left, the counts on the right.
-    const left = fit(current, Math.max(10, width - counts.length - 4))
+    const r2 = fitRow2(width, current, counts)
     return (
       <Box flexDirection="column">
         {row1}
         <Box>
-          <Text>{left}</Text>
+          <Text>{r2.left}</Text>
           <Text dimColor>
-            {gap(left.length, counts.length, width)}
-            {counts}
+            {r2.space}
+            {r2.right}
           </Text>
         </Box>
       </Box>

@@ -37,8 +37,8 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text', text: /Run tests/ }))?.text).toBe(' Bash: Run tests')
-    expect((await ui.find({ type: 'Text', text: /learning/ }))?.text).toBe(' ETA learning 0/5')
+    expect((await ui.find({ type: 'Text', text: /Run tests/ }))?.text?.trim()).toBe('Bash: Run tests')
+    expect((await ui.find({ type: 'Text', text: /learning/ }))?.text?.trim()).toBe('ETA learning 0/5')
     await ui.unmount()
   }
   clockMs = 60_000
@@ -58,7 +58,7 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   await $.turn.start({ text: 'go', turnId: 't6' })
   clockMs += 20_000
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /left/ }))?.text).toBe(' ~40s left')
+  expect((await ui.find({ type: 'Text', text: /left/ }))?.text?.trim()).toBe('~40s left')
   await ui.unmount()
 
   // At the end the band compares the first estimate with the real time.
@@ -103,7 +103,7 @@ function taskEngine(on: Parameters<Body>[1], clock: { ms: number }) {
 
 async function band($: Parameters<Body>[0]) {
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  const eta = (await ui.find({ type: 'Text', text: /left|learning|longer/ }))?.text
+  const eta = (await ui.find({ type: 'Text', text: /left|learning|longer/ }))?.text?.trim()
   const step = (await ui.find({ type: 'Text', text: /steps/ }))?.text ?? ''
   await ui.unmount()
   return { eta, step }
@@ -123,7 +123,7 @@ test('a task list drives the ETA', async ($, on) => {
   await $.tool.call(set('1', 'completed'))
   // 30 s for 1 task, 3 tasks left: 90 s.
   const b = await band($)
-  expect(b.eta).toBe(' ~1m30s left (by tasks)')
+  expect(b.eta).toBe('~1m30s left (by tasks)')
   expect(b.step).toContain('task 2 of 4')
 })
 
@@ -145,7 +145,7 @@ test('a new list in a later turn still drives the ETA', async ($, on) => {
   await $.tool.call(set('5', 'completed'))
   // 20 s for 1 task of the new list, 2 left: 40 s.
   const b = await band($)
-  expect(b.eta).toBe(' ~40s left (by tasks)')
+  expect(b.eta).toBe('~40s left (by tasks)')
   expect(b.step).toContain('task 2 of 3')
 })
 
@@ -171,7 +171,7 @@ test('TodoWrite replaces the list, and a new list counts in its own turn', async
   clock.ms = 60_000
   await $.tool.call(todo(1, 3))
   // 10 s for 1 task, 2 left: 20 s.
-  expect((await band($)).eta).toBe(' ~20s left (by tasks)')
+  expect((await band($)).eta).toBe('~20s left (by tasks)')
 })
 
 test('a reopened task, an unknown id and a failed update count for nothing', async ($, on) => {
@@ -187,7 +187,7 @@ test('a reopened task, an unknown id and a failed update count for nothing', asy
   await $.tool.call(set('98', 'completed'))
   const b = await band($)
   // 0 done, 3 tasks: no estimate by tasks yet.
-  expect(b.eta).toBe(' ETA learning 0/5')
+  expect(b.eta).toBe('ETA learning 0/5')
   expect(b.step).toContain('task 1 of 3')
 })
 
@@ -202,7 +202,7 @@ test('parallel task calls lose no update', async ($, on) => {
   const b = await band($)
   // 20 s for 2 tasks, 2 left: 20 s.
   expect(b.step).toContain('task 3 of 4')
-  expect(b.eta).toBe(' ~20s left (by tasks)')
+  expect(b.eta).toBe('~20s left (by tasks)')
 })
 
 test('todos with the same text stay separate tasks', async ($, on) => {
@@ -222,5 +222,5 @@ test('todos with the same text stay separate tasks', async ($, on) => {
   clock.ms = 20_000
   await $.tool.call(todos(2))
   // 10 s per task, 2 left: 20 s.
-  expect((await band($)).eta).toBe(' ~20s left (by tasks)')
+  expect((await band($)).eta).toBe('~20s left (by tasks)')
 })
