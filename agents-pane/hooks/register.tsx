@@ -25,7 +25,7 @@ async function redraw($: EngineInterface): Promise<void> {
 
 function shortModel(id: string | undefined): string {
   if (!id) return '?'
-  const m = /(fable|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/i.exec(id)
+  const m = /(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/i.exec(id)
   return m ? `${m[1]?.toLowerCase()} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
 }
 
@@ -94,9 +94,12 @@ export const register: Register = on => {
       (x, y) => ORDER.indexOf(x.a.status) - ORDER.indexOf(y.a.status) || y.a.startTime - x.a.startTime,
     )
     const live = rows.filter(r => ['running', 'waiting', 'pending'].includes(r.a.status))
+    const running = rows.filter(r => r.a.status === 'running').length
     const rest = rows.filter(r => !live.includes(r))
     const tokens = rows.reduce((n, r) => n + r.tokens, 0)
-    const usd = rows.some(r => r.usd === undefined) ? undefined : rows.reduce((n, r) => n + (r.usd ?? 0), 0)
+    // Sum the agents that have a cost yet; a '+' marks that one or more have none yet.
+    const usd = rows.reduce((n, r) => n + (r.usd ?? 0), 0)
+    const isPartial = rows.some(r => r.usd === undefined)
     const room = Math.max(3, Math.floor(((e.viewport?.rows ?? 30) - 6) / 4))
 
     const card = (r: (typeof rows)[number], isLive: boolean) => {
@@ -149,10 +152,11 @@ export const register: Register = on => {
         <Box flexDirection="column" paddingX={1}>
           <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={1}>
             <Text weight="bold" tabular wrap="clip">
-              {live.length} running · {rest.length} finished
+              {running} running · {rest.length} finished
             </Text>
             <Text weight="bold" tabular wrap="clip">
               {usdText(usd)}
+              {isPartial ? '+' : ''}
             </Text>
           </Box>
           <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={1}>
@@ -165,6 +169,13 @@ export const register: Register = on => {
           </Box>
         </Box>
         {live.slice(0, room).map(r => card(r, true))}
+        {live.length > room && (
+          <Box paddingX={1}>
+            <Text dimColor size="footnote">
+              +{live.length - room} more running
+            </Text>
+          </Box>
+        )}
         {rest.length > 0 && (
           <Box flexDirection="column">
             <Box paddingX={1}>

@@ -20,8 +20,9 @@ export function agentTokens(usage: readonly Usage[]): number {
 }
 
 export function tokensText(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k`
+  if (n >= 999_500) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 99_950) return `${Math.round(n / 1000)}k`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
 }
 

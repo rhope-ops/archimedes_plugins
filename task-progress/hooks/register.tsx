@@ -291,27 +291,29 @@ export const register: Register = on => {
 
     // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
     // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
-    // Row 2, after a small gap: a thin bar drawn with line glyphs, filled as a share of the row.
+    // Row 2, after a small gap: a segmented bar (▰ filled, ▱ empty), filled as a share of the row.
     if (e.surface !== 'terminal') {
-      const LINE = '━'.repeat(400)
+      // Segmented blocks: filled ▰ and empty ▱, half a line high, clipped to the row.
+      const FILLED = '▰'.repeat(240)
+      const EMPTY = '▱'.repeat(240)
       const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
       const share = (x: number) => `${Math.round(Math.min(1, Math.max(0, x)) * 100)}%`
       const eta = p.isRunning
         ? tail.trim() + (pct ? ` (${pct.trim()})` : '')
         : p.predictedMs !== null && p.outcome === 'Done'
           ? `est ${duration(p.predictedMs)} · off ${Math.round(relError(p.predictedMs, elapsedMs) * 100)}%`
-          : p.outcome
+          : ''
       const metrics = [counts, eta].filter(Boolean).join(' · ')
       const at = (Math.floor(elapsedMs / 1000) * 10) % 80
       const seg = (key: string, width: string | null, color: string | null) => (
         <Box key={key} {...(width === null ? { flexGrow: 1, flexShrink: 1 } : { width, flexShrink: 0 })} minWidth={0} overflow="hidden">
           {color === null ? (
             <Text dimColor wrap="clip" maxLines={1}>
-              {LINE}
+              {EMPTY}
             </Text>
           ) : (
             <Text color={color} wrap="clip" maxLines={1}>
-              {LINE}
+              {FILLED}
             </Text>
           )}
         </Box>

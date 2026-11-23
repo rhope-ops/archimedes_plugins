@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { tokensText } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -57,4 +58,10 @@ test('cards show the /cost estimate and the tokens; running first', async ($, on
     expect(texts.indexOf('Fix token log')).toBeLessThan(texts.indexOf('Find files'))
     await ui.unmount()
   }
+})
+
+test('helpers: model names with dates, token rounding', async () => {
+  expect(tokensText(999_950)).toBe('1.0M')
+  expect(tokensText(99_960)).toBe('100k')
+  expect(tokensText(1_500)).toBe('1.5k')
 })
