@@ -1,0 +1,1 @@
+{ "name": "file-tree", "version": "0.1.0", "description": "Side pane of the files Claude reads, changes and commits, live", "types": "./types/index.d.ts" }

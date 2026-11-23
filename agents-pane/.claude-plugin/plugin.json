@@ -1,0 +1,1 @@
+{ "name": "agents-pane", "version": "0.1.0", "description": "Side pane: each subagent with its task, model, status, tokens and estimated cost", "types": "./types/index.d.ts" }

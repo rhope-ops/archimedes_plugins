@@ -1,0 +1,1 @@
+{ "name": "advisor-watch", "version": "0.1.0", "description": "Toast and status line each time the advisor model is consulted, with session and all-time counts", "types": "./types/index.d.ts" }
