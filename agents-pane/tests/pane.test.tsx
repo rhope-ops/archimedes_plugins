@@ -260,7 +260,7 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
     { window: 'seven_day', percent_used: 41, resets_at: null },
   ])
   expect(typeof r.limits_read_at).toBe('string')
-  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 13% · 7d 41%')
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 12% · 7d 41%')
   rateLimits = []
 
   // TOKEN_LOG_HOME moves it; TOKEN_LOG=off stops it.
@@ -308,5 +308,28 @@ test('a subagent turn with usage does not count as main; /clear starts the ledge
   expect(texts).toContain('Main conversation · 1 turn')
   expect(texts).toContain('$0.10')
   sessionUsd = 0
+  sessionIdNow = 'sess-1'
+})
+
+test('plan limits: an empty reading keeps the last one, a lower one replaces it, /clear clears them', async ($, on) => {
+  const now = Date.now()
+  sessionIdNow = 'sess-1'
+  rateLimits = [{ kind: 'five_hour', percentUsed: 97 }, { kind: 'seven_day', percentUsed: 60 }]
+  await setup($, on, () => [agent('a1', 'running', 0.1, now - 1000)])
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 97% · 7d 60%')
+  // No windows in this response: the last reading stays.
+  rateLimits = []
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 97% · 7d 60%')
+  // The 5-hour window reset: the newer, lower reading wins.
+  rateLimits = [{ kind: 'five_hour', percentUsed: 3 }, { kind: 'seven_day', percentUsed: 61 }]
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 3% · 7d 61%')
+  // /clear: a new ledger with no limits until the next reading.
+  sessionIdNow = 'sess-2'
+  rateLimits = []
+  await poke($)
+  expect((await paneTexts($, 'desktop')).join('\n')).not.toContain('Plan limits')
   sessionIdNow = 'sess-1'
 })

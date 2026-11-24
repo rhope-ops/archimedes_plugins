@@ -61,11 +61,20 @@ async function refresh($: EngineInterface): Promise<void> {
   // A reading taken before a /clear reset is dropped, so the old session's agents do not come back.
   if (after !== before) await update($, ledger, current => (isSameSession(current, id) ? sync(current, list.map(snapOf), t) : current))
   const usage = await $.session.usage()
+  // The time of this reading: after it resolved, so an overlapping older reading compares as older.
+  const readAt = Date.now()
   const usd = usage.cost?.usd ?? null
-  // The /usage windows: the latest reading wins (they can go down when a window resets).
+  // The /usage windows: the newest reading wins (they go down when a window resets), never an older one.
+  // An empty list (off a subscription, or no response yet) keeps the earlier reading. An unchanged reading
+  // renews its time at most once a minute, so limits_read_at stays close to now without a redraw every 2 s.
   const limits = limitsOf(usage.rateLimits)
-  if (limits.length > 0 && JSON.stringify(limits) !== JSON.stringify(before.limits)) {
-    await update($, ledger, current => (isSameSession(current, id) ? { ...current, limits, limitsAt: t } : current))
+  const isChanged = JSON.stringify(limits) !== JSON.stringify(before.limits)
+  if (limits.length > 0 && (isChanged || before.limitsAt === null || readAt - before.limitsAt >= 60_000)) {
+    await update($, ledger, current =>
+      isSameSession(current, id) && (current.limitsAt === null || readAt >= current.limitsAt)
+        ? { ...current, limits, limitsAt: readAt }
+        : current,
+    )
   }
   // The /cost total only grows within a session: an older reading that lands late never lowers it.
   if (usd !== null && usd !== before.sessionUsd) {
@@ -209,10 +218,11 @@ export const register: Register = on => {
         </Text>
       </Box>
     )
-    // The plan's limits, as /usage shows them (whole account): "Plan limits: 5h 12% · 7d 41%".
+    // The plan's limits, as /usage shows them (whole account): "Plan limits: 5h 12% · 7d 41%". Rounded down,
+    // so 99.5% never shows as 100% before the window is used up.
     const WINDOW: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
     const limitsLine =
-      l.limits.length === 0 ? '' : `Plan limits: ${l.limits.map(x => `${WINDOW[x.kind] ?? x.kind} ${Math.round(x.percentUsed)}%`).join(' · ')}`
+      l.limits.length === 0 ? '' : `Plan limits: ${l.limits.map(x => `${WINDOW[x.kind] ?? x.kind} ${Math.floor(x.percentUsed)}%`).join(' · ')}`
     const sessionBlock = (
       <Box key="session" flexDirection="column" paddingX={1}>
         <Text dimColor size="caption" weight="semibold">
