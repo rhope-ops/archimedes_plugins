@@ -39,6 +39,8 @@ const agent = (id: string, status: string, usd: number | undefined, startTime: n
 // The session's /cost total the engine reports; a test sets it.
 let sessionUsd = 0
 let sessionIdNow = 'sess-1'
+// The /usage windows the engine reports; a test sets them.
+let rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
 
 async function setup($: any, on: any, list: () => unknown[]) {
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
@@ -50,7 +52,7 @@ async function setup($: any, on: any, list: () => unknown[]) {
   // The engine always has a session id; a test sets `sessionIdNow`.
   on('session.id', () => ({ value: sessionIdNow }))
   on('agent.list', () => ({ value: list() as never }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: sessionUsd } } as never }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits, cost: { usd: sessionUsd } } as never }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 }
 
@@ -140,7 +142,7 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
 })
 
 test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
-  const empty = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  const empty = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null, limits: [], limitsAt: null }
   const snap = (id: string, type: string, status: string, out: number) => ({
     id,
     description: id,
@@ -223,6 +225,10 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
   const files = new Map<string, string>()
   const env: Record<string, string | undefined> = { HOME: '/home/t', TOKEN_LOG: undefined, TOKEN_LOG_HOME: undefined }
   sessionUsd = 2.0
+  rateLimits = [
+    { kind: 'five_hour', percentUsed: 12.5, resetsAt: '2026-11-24T22:00:00Z' },
+    { kind: 'seven_day', percentUsed: 41 },
+  ]
   on('env.get', (_: unknown, e: { name: string }) => ({ value: env[e.name] }))
   on('fs.write', (_: unknown, e: { path: string; text: string }) => (files.set(e.path, e.text), { value: undefined }))
   await setup($, on, () => [agent('a1', 'completed', 0.5, now - 60_000, 'Explore')])
@@ -248,6 +254,14 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
   expect(r.subagents[0].type).toBe('Explore')
   // No task text in the record.
   expect(text).not.toContain('Task a1')
+  // The /usage windows, as read.
+  expect(r.limits).toEqual([
+    { window: 'five_hour', percent_used: 12.5, resets_at: '2026-11-24T22:00:00Z' },
+    { window: 'seven_day', percent_used: 41, resets_at: null },
+  ])
+  expect(typeof r.limits_read_at).toBe('string')
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 12% · 7d 41%')
+  rateLimits = []
 
   // TOKEN_LOG_HOME moves it; TOKEN_LOG=off stops it.
   files.clear()
@@ -264,7 +278,7 @@ test('each turn end writes the /cost record where the token-log hook reads it', 
 })
 
 test('cost record: no session cost yet gives null main cost; unsafe ids are refused', async () => {
-  const l = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null }
+  const l = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null, limits: [], limitsAt: null }
   expect(costRecord(l, 's', 0).main_usd).toBeNull()
   expect(isSafeId('216be8a9-f390-5737-904e-8abe3708475f')).toBe(true)
   expect(isSafeId('../x')).toBe(false)
@@ -294,5 +308,28 @@ test('a subagent turn with usage does not count as main; /clear starts the ledge
   expect(texts).toContain('Main conversation · 1 turn')
   expect(texts).toContain('$0.10')
   sessionUsd = 0
+  sessionIdNow = 'sess-1'
+})
+
+test('plan limits: an empty reading keeps the last one, a lower one replaces it, /clear clears them', async ($, on) => {
+  const now = Date.now()
+  sessionIdNow = 'sess-1'
+  rateLimits = [{ kind: 'five_hour', percentUsed: 97 }, { kind: 'seven_day', percentUsed: 60 }]
+  await setup($, on, () => [agent('a1', 'running', 0.1, now - 1000)])
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 97% · 7d 60%')
+  // No windows in this response: the last reading stays.
+  rateLimits = []
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 97% · 7d 60%')
+  // The 5-hour window reset: the newer, lower reading wins.
+  rateLimits = [{ kind: 'five_hour', percentUsed: 3 }, { kind: 'seven_day', percentUsed: 61 }]
+  await poke($)
+  expect(await paneTexts($, 'desktop')).toContain('Plan limits: 5h 3% · 7d 61%')
+  // /clear: a new ledger with no limits until the next reading.
+  sessionIdNow = 'sess-2'
+  rateLimits = []
+  await poke($)
+  expect((await paneTexts($, 'desktop')).join('\n')).not.toContain('Plan limits')
   sessionIdNow = 'sess-1'
 })

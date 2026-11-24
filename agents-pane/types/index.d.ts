@@ -33,7 +33,13 @@ export type Ledger = {
   mainTurns: number
   // The whole session's /cost estimate (main, subagents and mods' model calls); null before one exists.
   sessionUsd: number | null
+  // The plan's usage limits as /usage shows them (5-hour and 7-day windows), for the whole account, at
+  // the time `limitsAt`; empty off a subscription or before the first API response.
+  limits: UsageLimit[]
+  limitsAt: number | null
 }
+
+export type UsageLimit = { kind: string; percentUsed: number; resetsAt: string | null }
 
 declare module 'claude-code' {
   interface PluginState {

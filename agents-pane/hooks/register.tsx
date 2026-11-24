@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, Ledger } from '../types'
-import { addUsage, costRecord, isSafeId, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
+import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
@@ -16,8 +16,10 @@ const EMPTY: Ledger = {
   main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   mainTurns: 0,
   sessionUsd: null,
+  limits: [],
+  limitsAt: null,
 }
-const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-3' })
+const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-4' })
 
 // Start the ledger over when the session id changed (/clear). The first id seen is adopted.
 // Resolves the id, so a caller can drop a reading taken under another session.
@@ -47,6 +49,10 @@ const STATUS: Record<string, { icon: string; color: string; word: string }> = {
 }
 const LIVE = ['running', 'waiting', 'pending']
 
+// The order of /usage readings in this copy of the module: `seq` counts readings in, `applied` is the newest
+// one written. After a hot reload both start over together, so the order stays consistent.
+const reads = { seq: 0, applied: 0 }
+
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
   const id = await ensureSession($).catch(() => '')
@@ -58,7 +64,25 @@ async function refresh($: EngineInterface): Promise<void> {
   const after = sync(before, list.map(snapOf), t)
   // A reading taken before a /clear reset is dropped, so the old session's agents do not come back.
   if (after !== before) await update($, ledger, current => (isSameSession(current, id) ? sync(current, list.map(snapOf), t) : current))
-  const usd = (await $.session.usage()).cost?.usd ?? null
+  const usage = await $.session.usage()
+  // The time of this reading: after it resolved, so an overlapping older reading compares as older.
+  const readAt = Date.now()
+  const usd = usage.cost?.usd ?? null
+  // The /usage windows: the newest reading wins (they go down when a window resets), never an older one.
+  // An empty list (off a subscription, or no response yet) keeps the earlier reading. An unchanged reading
+  // renews its time at most once a minute, so limits_read_at stays close to now without a redraw every 2 s.
+  // Readings are ordered by a counter taken once the reading is in, not by the wall clock, which can step back.
+  const n = ++reads.seq
+  const limits = limitsOf(usage.rateLimits)
+  if (limits.length > 0) {
+    await update($, ledger, current => {
+      if (!isSameSession(current, id) || n < reads.applied) return current
+      const isChanged = JSON.stringify(limits) !== JSON.stringify(current.limits)
+      if (!isChanged && current.limitsAt !== null && Math.abs(readAt - current.limitsAt) < 60_000) return current
+      reads.applied = Math.max(reads.applied, n)
+      return { ...current, limits, limitsAt: readAt }
+    })
+  }
   // The /cost total only grows within a session: an older reading that lands late never lowers it.
   if (usd !== null && usd !== before.sessionUsd) {
     await update($, ledger, current =>
@@ -201,6 +225,11 @@ export const register: Register = on => {
         </Text>
       </Box>
     )
+    // The plan's limits, as /usage shows them (whole account): "Plan limits: 5h 12% · 7d 41%". Rounded down,
+    // so 99.5% never shows as 100% before the window is used up.
+    const WINDOW: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
+    const limitsLine =
+      l.limits.length === 0 ? '' : `Plan limits: ${l.limits.map(x => `${WINDOW[x.kind] ?? x.kind} ${Math.floor(x.percentUsed)}%`).join(' · ')}`
     const sessionBlock = (
       <Box key="session" flexDirection="column" paddingX={1}>
         <Text dimColor size="caption" weight="semibold">
@@ -209,6 +238,11 @@ export const register: Register = on => {
         {row('main', `Main conversation · ${l.mainTurns} turn${l.mainTurns === 1 ? '' : 's'}`, `${tokensText(mainTokens)} tok`, usdText(mainUsd))}
         {row('sub', `Subagents · ${all.length}`, `${tokensText(subTokens)} tok`, usdText(all.length > 0 ? subUsd : 0))}
         {row('total', 'Session total', `${tokensText(mainTokens + subTokens)} tok`, usdText(l.sessionUsd ?? undefined), true)}
+        {limitsLine !== '' && (
+          <Text dimColor size="footnote" tabular wrap="end" maxLines={1}>
+            {limitsLine}
+          </Text>
+        )}
       </Box>
     )
 
