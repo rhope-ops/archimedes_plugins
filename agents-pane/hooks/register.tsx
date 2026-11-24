@@ -49,6 +49,10 @@ const STATUS: Record<string, { icon: string; color: string; word: string }> = {
 }
 const LIVE = ['running', 'waiting', 'pending']
 
+// The order of /usage readings in this copy of the module: `seq` counts readings in, `applied` is the newest
+// one written. After a hot reload both start over together, so the order stays consistent.
+const reads = { seq: 0, applied: 0 }
+
 // Read the live list and fold it into the ledger. Writes only when something changed.
 async function refresh($: EngineInterface): Promise<void> {
   const id = await ensureSession($).catch(() => '')
@@ -67,14 +71,17 @@ async function refresh($: EngineInterface): Promise<void> {
   // The /usage windows: the newest reading wins (they go down when a window resets), never an older one.
   // An empty list (off a subscription, or no response yet) keeps the earlier reading. An unchanged reading
   // renews its time at most once a minute, so limits_read_at stays close to now without a redraw every 2 s.
+  // Readings are ordered by a counter taken once the reading is in, not by the wall clock, which can step back.
+  const n = ++reads.seq
   const limits = limitsOf(usage.rateLimits)
-  const isChanged = JSON.stringify(limits) !== JSON.stringify(before.limits)
-  if (limits.length > 0 && (isChanged || before.limitsAt === null || readAt - before.limitsAt >= 60_000)) {
-    await update($, ledger, current =>
-      isSameSession(current, id) && (current.limitsAt === null || readAt >= current.limitsAt)
-        ? { ...current, limits, limitsAt: readAt }
-        : current,
-    )
+  if (limits.length > 0) {
+    await update($, ledger, current => {
+      if (!isSameSession(current, id) || n < reads.applied) return current
+      const isChanged = JSON.stringify(limits) !== JSON.stringify(current.limits)
+      if (!isChanged && current.limitsAt !== null && Math.abs(readAt - current.limitsAt) < 60_000) return current
+      reads.applied = Math.max(reads.applied, n)
+      return { ...current, limits, limitsAt: readAt }
+    })
   }
   // The /cost total only grows within a session: an older reading that lands late never lowers it.
   if (usd !== null && usd !== before.sessionUsd) {
