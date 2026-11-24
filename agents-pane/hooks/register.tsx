@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, Ledger } from '../types'
-import { addUsage, costRecord, isSafeId, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
+import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
@@ -16,8 +16,10 @@ const EMPTY: Ledger = {
   main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   mainTurns: 0,
   sessionUsd: null,
+  limits: [],
+  limitsAt: null,
 }
-const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-3' })
+const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-4' })
 
 // Start the ledger over when the session id changed (/clear). The first id seen is adopted.
 // Resolves the id, so a caller can drop a reading taken under another session.
@@ -58,7 +60,13 @@ async function refresh($: EngineInterface): Promise<void> {
   const after = sync(before, list.map(snapOf), t)
   // A reading taken before a /clear reset is dropped, so the old session's agents do not come back.
   if (after !== before) await update($, ledger, current => (isSameSession(current, id) ? sync(current, list.map(snapOf), t) : current))
-  const usd = (await $.session.usage()).cost?.usd ?? null
+  const usage = await $.session.usage()
+  const usd = usage.cost?.usd ?? null
+  // The /usage windows: the latest reading wins (they can go down when a window resets).
+  const limits = limitsOf(usage.rateLimits)
+  if (limits.length > 0 && JSON.stringify(limits) !== JSON.stringify(before.limits)) {
+    await update($, ledger, current => (isSameSession(current, id) ? { ...current, limits, limitsAt: t } : current))
+  }
   // The /cost total only grows within a session: an older reading that lands late never lowers it.
   if (usd !== null && usd !== before.sessionUsd) {
     await update($, ledger, current =>
@@ -201,6 +209,10 @@ export const register: Register = on => {
         </Text>
       </Box>
     )
+    // The plan's limits, as /usage shows them (whole account): "Plan limits: 5h 12% · 7d 41%".
+    const WINDOW: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
+    const limitsLine =
+      l.limits.length === 0 ? '' : `Plan limits: ${l.limits.map(x => `${WINDOW[x.kind] ?? x.kind} ${Math.round(x.percentUsed)}%`).join(' · ')}`
     const sessionBlock = (
       <Box key="session" flexDirection="column" paddingX={1}>
         <Text dimColor size="caption" weight="semibold">
@@ -209,6 +221,11 @@ export const register: Register = on => {
         {row('main', `Main conversation · ${l.mainTurns} turn${l.mainTurns === 1 ? '' : 's'}`, `${tokensText(mainTokens)} tok`, usdText(mainUsd))}
         {row('sub', `Subagents · ${all.length}`, `${tokensText(subTokens)} tok`, usdText(all.length > 0 ? subUsd : 0))}
         {row('total', 'Session total', `${tokensText(mainTokens + subTokens)} tok`, usdText(l.sessionUsd ?? undefined), true)}
+        {limitsLine !== '' && (
+          <Text dimColor size="footnote" tabular wrap="end" maxLines={1}>
+            {limitsLine}
+          </Text>
+        )}
       </Box>
     )
 

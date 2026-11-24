@@ -3,7 +3,7 @@
 // long prompts and search fees. Source of truth for prices: platform.claude.com/docs/en/about-claude/pricing.
 
 import type { AgentInfo } from 'claude-code'
-import type { AgentSnap, Ledger, TokenSplit } from '../types'
+import type { AgentSnap, Ledger, TokenSplit, UsageLimit } from '../types'
 
 export type Usage = {
   model: string
@@ -173,6 +173,9 @@ export type CostRecord = {
   session_usd: number | null
   main_usd: number | null
   subagents_usd: number
+  // The plan's usage limits (/usage), for the whole account, as read at `limits_read_at`.
+  limits: { window: string; percent_used: number; resets_at: string | null }[]
+  limits_read_at: string | null
   main: { turns: number; input: number; output: number; cache_read: number; cache_write: number }
   subagents: {
     agent_id: string
@@ -201,6 +204,8 @@ export function costRecord(l: Ledger, sessionId: string, now: number): CostRecor
     session_usd: l.sessionUsd,
     main_usd: l.sessionUsd === null ? null : Math.max(0, l.sessionUsd - subUsd),
     subagents_usd: subUsd,
+    limits: l.limits.map(x => ({ window: x.kind, percent_used: x.percentUsed, resets_at: x.resetsAt })),
+    limits_read_at: l.limitsAt === null ? null : iso(l.limitsAt),
     main: {
       turns: l.mainTurns,
       input: l.main.input,
@@ -226,3 +231,10 @@ export function costRecord(l: Ledger, sessionId: string, now: number): CostRecor
 
 // Only a plain id may name the file.
 export const isSafeId = (id: string) => /^[A-Za-z0-9._-]{1,128}$/.test(id) && !id.startsWith('.')
+
+// The /usage windows as the engine reports them, kept to plain data with sane numbers.
+export function limitsOf(raw: readonly { kind: string; percentUsed: number; resetsAt?: string }[] | undefined): UsageLimit[] {
+  return (raw ?? [])
+    .filter(r => typeof r.kind === 'string' && Number.isFinite(r.percentUsed))
+    .map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: typeof r.resetsAt === 'string' ? r.resetsAt : null }))
+}
