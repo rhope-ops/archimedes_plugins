@@ -44,6 +44,25 @@ export function fit(text: string, n: number): string {
   return `${out}…`
 }
 
+// `lead` then a path, in `n` cells: the path is cut at its start ("…/b/file.ts"), so the file
+// name stays; the lead goes only when even the name does not fit.
+export function fitPath(lead: string, path: string, n: number): string {
+  if (cells(lead) + cells(path) <= n) return `${lead}${path}`
+  const room = n - cells(lead)
+  if (room < 4) return fit(path.slice(path.lastIndexOf('/') + 1), n)
+  let out = ''
+  let used = 1
+  for (const ch of [...path].reverse()) {
+    const w = cellOf(ch.codePointAt(0) ?? 0)
+    if (used + w > room) break
+    out = ch + out
+    used += w
+  }
+  // Break at a folder boundary when one is left: "…/deep/app.ts", not "…y/deep/app.ts".
+  const slash = out.indexOf('/')
+  return `${lead}…${slash > 0 ? out.slice(slash) : out}`
+}
+
 // Spaces that push `right` to the end of a `width`-cell row after `left`.
 export function gap(left: number, right: number, width: number): string {
   return ' '.repeat(Math.max(1, width - left - right))
@@ -194,9 +213,23 @@ export const ROLE_NAMED: Record<Role, string> = {
 }
 
 // A path to show: relative to the session folder when inside it, else the last 3 parts.
+// A subagent's worktree (`.claude/worktrees/<name>/`) is cut off, so the repo path shows.
 export function shortPath(path: string, cwd: string): string {
+  const wt = path.match(/\/\.claude\/worktrees\/[^/]+\/(.+)$/)
+  if (wt?.[1] !== undefined) return wt[1]
   const root = cwd.endsWith('/') ? cwd : `${cwd}/`
   if (cwd !== '' && cwd !== '/' && path.startsWith(root)) return path.slice(root.length)
   const parts = path.split('/').filter(p => p !== '')
   return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : path
 }
+
+// The short path in two parts, so a narrow row cuts the folder and keeps the file name.
+export function splitPath(path: string, cwd: string): { dir: string; name: string } {
+  const short = shortPath(path, cwd)
+  const at = short.lastIndexOf('/')
+  return at < 0 ? { dir: '', name: short } : { dir: short.slice(0, at + 1), name: short.slice(at + 1) }
+}
+
+// Cells of the left column of rows 1 and 2 ("◐ 1:02:03", "■ reviewer"), so the goal and
+// the file start at the same place.
+export const GUTTER = 11

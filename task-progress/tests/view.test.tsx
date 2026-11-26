@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ROLE_HEX, STATE_HEX, bar, cells, ease, fit, meter, roleOf, row1, shortPath, stateOf, sweep, verdict } from '../hooks/view'
+import { GUTTER, ROLE_HEX, STATE_HEX, bar, cells, ease, fit, fitPath, meter, roleOf, row1, shortPath, splitPath, stateOf, sweep, verdict } from '../hooks/view'
 
 // The test runner has timers; the mod's own types do not declare them.
 declare const setTimeout: (fn: (v?: unknown) => void, ms: number) => unknown
@@ -101,19 +101,28 @@ function engine(on: Parameters<Body>[1], clock: { ms: number }, advisorCalls: { 
 
 const END = { reason: 'answer', answer: '', durationMs: 1, isAborted: false } as const
 
-// Five 90 s turns, so the next turn has an estimate from history.
-async function learn($: Parameters<Body>[0], clock: { ms: number }) {
-  for (const id of ['h1', 'h2', 'h3', 'h4', 'h5']) {
-    clock.ms += 1000
-    await $.turn.start({ text: 'go', turnId: id })
-    clock.ms += 90_000
-    await $.turn.complete({ turnId: id, ...END })
-  }
+// Task tools that answer as the real ones do, so a task list drives the estimate.
+function taskTools(on: Parameters<Body>[1]) {
+  let next = 0
+  on('tool.call', (_, e) => {
+    const a = e as unknown as Record<string, unknown>
+    if (e.tool === 'TaskCreate') return { result: { task: { id: String(++next), subject: String(a.subject) } } }
+    if (e.tool === 'TaskUpdate') return { result: { success: true, taskId: String(a.taskId), updatedFields: [] } }
+    return { result: {} }
+  })
+}
+
+// `n` new tasks; the first `done` of them completed at `atMs`.
+async function plan($: Parameters<Body>[0], clock: { ms: number }, n: number, done: number, atMs: number) {
+  for (let i = 0; i < n; i++) await $.tool.call({ tool: 'TaskCreate', subject: `t${i}`, description: `t${i}` })
+  clock.ms = atMs
+  for (let i = 1; i <= done; i++) await $.tool.call({ tool: 'TaskUpdate', taskId: String(i), status: 'completed' })
 }
 
 test('terminal: 3 rows, each exactly the width, in each state', async ($, on) => {
   const clock = { ms: 0 }
-  engine(on, clock, { n: 0 })
+  engine(on, clock, { n: 0 }, false)
+  taskTools(on)
   const rows = async (cols: number) => {
     const ui = await $.ui.mount({ ...BAND(cols, 3), surface: 'terminal' })
     const r = await Promise.all(['row1', 'row2', 'bar'].map(async key => (await ui.find({ key }))?.text ?? ''))
@@ -124,24 +133,28 @@ test('terminal: 3 rows, each exactly the width, in each state', async ($, on) =>
   await $.turn.start({ text: 'go', turnId: 't0' })
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
   clock.ms = 7_000
-  expect((await rows(100))[0]).toContain('ETA learning 0/5')
+  expect((await rows(100))[0]).not.toContain('learning')
   await $.turn.complete({ turnId: 't0', ...END })
 
-  await learn($, clock)
-  clock.ms += 1000
+  // 3 tasks, 1 done at 30 s: 60 s left, so the first estimate of the turn is 1m30s.
+  clock.ms = 100_000
   await $.turn.start({ text: 'go', turnId: 't6' })
+  await plan($, clock, 3, 1, 130_000)
   await $.tool.call({ tool: 'Edit', file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' })
-  clock.ms += 30_000
   for (const cols of [40, 60, 100, 160]) {
     const r = await rows(cols)
     for (const row of r) expect(cells(row)).toBe(cols)
-    expect(r[1]).toContain('main edits src/app.ts')
+    expect(r[1]).toMatch(/■ main +edits src\/app\.ts/)
+    // From 44 columns, row 2's text starts in the same cell as row 1's goal (after the gutter).
+    if (cols >= 44) expect((r[1] ?? '').indexOf('edits')).toBe(12)
   }
 
   clock.ms += 60_000
   await $.turn.complete({ turnId: 't6', ...END })
   const end = await rows(100)
   expect(end[0]).toContain('est 1m30s ✓')
+  // Review fix: at every width, each row is exactly that wide (no off-by-one at the column edges).
+  for (let cols = 20; cols <= 120; cols++) for (const row of await rows(cols)) expect(`${cols}:${cells(row)}:${row}`).toBe(`${cols}:${cols}:${row}`)
   expect(end[1]).toContain('1 file changed')
   expect(end[2]).toBe('█'.repeat(100))
 })
@@ -155,9 +168,10 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
   clock.ms = 47_000
   let ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
-  expect((await ui.find({ key: 'row1' }))?.text).toContain('ETA learning 0/5')
+  expect((await ui.find({ key: 'row1' }))?.text).not.toContain('learning')
   expect((await ui.find({ type: 'Text', text: /0:47/ }))?.props?.tabular).toBe(true)
-  expect((await ui.find({ key: 'metrics' }))?.props?.flexShrink).toBe(0)
+  // Nothing at the right while the estimate learns: no empty box either.
+  expect(await ui.find({ key: 'metrics' })).toBeUndefined()
   expect((await ui.find({ key: 'row2' }))?.text).toContain('Bash: Run the test suite')
   // No advisor call yet: no advisor text.
   expect((await ui.find({ key: 'advisor' }))).toBeUndefined()
@@ -178,26 +192,41 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
   const row2 = await ui.find({ key: 'row2' })
   expect(row2?.text).toContain('reviewer')
-  expect(row2?.text).toContain('reads hooks/view.ts')
+  // Verb, folder and name in their own Texts: the folder gives way first, the name stays.
+  expect((await ui.find({ key: 'verb' }))?.text).toBe('reads')
+  expect((await ui.find({ key: 'dir' }))?.text).toBe('hooks/')
+  expect((await ui.find({ key: 'name' }))?.text).toBe('view.ts')
+  // The folder gives way long before the name (which still ends in "…" as a last resort).
+  expect(Number((await ui.find({ key: 'dir' }))?.props?.flexShrink)).toBeGreaterThan(Number((await ui.find({ key: 'name' }))?.props?.flexShrink))
+  // The role label never shrinks: it sits in the fixed left column, the same width as the clock's.
+  const gutters = (await ui.findAll({ type: 'Box' })).filter(b => b.key === 'gutter')
+  expect(gutters.length).toBe(2)
+  for (const g of gutters) expect(g.props.minWidth).toBe(GUTTER)
+  // One face and one size: no Text of rows 1 and 2 sets a size or the monospaced face
+  // (the meter's blank cells are the only Texts with a size).
+  for (const t of (await ui.findAll({ type: 'Text' })).filter(t => t.text !== ' ')) {
+    expect(t.props.size).toBeUndefined()
+    expect(t.props.mono).toBeUndefined()
+  }
   expect((await ui.find({ type: 'Text', text: /reviewer/ }))?.props?.color).toBe(ROLE_HEX.reviewer)
   expect((await ui.find({ key: 'advisor' }))?.text).toContain('advisor ×2')
-  expect((await ui.find({ key: 'advisor' }))?.text).toContain('▮▮')
+  expect((await ui.find({ key: 'advisor' }))?.text).toContain('■■')
+  // The right column has one width on rows 1 and 2, flush right.
+  const cols = (await ui.findAll({ type: 'Box' })).filter(b => b.key === 'metrics' || b.key === 'advisor')
+  expect(cols.length).toBe(2)
+  expect(cols[0]?.props.minWidth).toBe(cols[1]?.props.minWidth)
+  for (const c of cols) expect(c.props.justifyContent).toBe('flex-end')
   await ui.unmount()
 })
 
 test('desktop meter: 30% lights 12 of 40 cells in blue; done lights all in green; same cells always', async ($, on) => {
   const clock = { ms: 0 }
-  engine(on, clock, { n: 0 })
+  engine(on, clock, { n: 0 }, false)
+  taskTools(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  for (const id of ['t1', 't2', 't3', 't4', 't5']) {
-    clock.ms += 1000
-    await $.turn.start({ text: 'go', turnId: id })
-    clock.ms += 100_000
-    await $.turn.complete({ turnId: id, ...END })
-  }
-  clock.ms += 1000
+  // 10 tasks, 3 done at 30 s: 70 s left, so 30% of the turn.
   await $.turn.start({ text: 'go', turnId: 't6' })
-  clock.ms += 30_000
+  await plan($, clock, 10, 3, 30_000)
   const lit = async () => {
     const ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
     const cs = (await ui.findAll({ type: 'Box' })).filter(b => /^c\d+$/.test(b.key ?? ''))
@@ -218,7 +247,8 @@ test('desktop meter: 30% lights 12 of 40 cells in blue; done lights all in green
   }
   expect(lit12).toBe(12)
 
-  clock.ms += 70_000
+  // The verdict compares the first estimate (after task 1: 30 s × 10 = 5m) with the real time.
+  clock.ms = 300_000
   await $.turn.complete({ turnId: 't6', ...END })
   cs = await lit()
   expect(cs.length).toBe(40)
@@ -286,6 +316,13 @@ test('roles by agent type, and short paths', async () => {
   expect(shortPath('/repo/src/app.ts', '/repo')).toBe('src/app.ts')
   expect(shortPath('/other/a/b/c/d.ts', '/repo')).toBe('…/b/c/d.ts')
   expect(shortPath('/x/y.ts', '/')).toBe('/x/y.ts')
+  // A subagent's worktree is cut off: the repo path shows.
+  expect(shortPath('/Users/u/s-2026-11-26T17-90-161.Z/.claude/worktrees/agent-a1/src/app.ts', '/repo')).toBe('src/app.ts')
+  expect(splitPath('/repo/src/ui/app.ts', '/repo')).toEqual({ dir: 'src/ui/', name: 'app.ts' })
+  expect(splitPath('/repo/app.ts', '/repo')).toEqual({ dir: '', name: 'app.ts' })
+  // The terminal cuts a long path at its start and keeps the file name.
+  expect(fitPath('reads ', 'src/components/very/deep/app.ts', 20)).toBe('reads …/deep/app.ts')
+  expect(fitPath('reads ', 'src/app.ts', 40)).toBe('reads src/app.ts')
 })
 
 test('the estimate verdict', async () => {
@@ -312,13 +349,7 @@ test('the verdict color matches the shown, rounded number', async () => {
 test('review fix: the bar keeps its fill when the estimate goes away mid-turn', async ($, on) => {
   const clock = { ms: 0 }
   engine(on, clock, { n: 0 }, false)
-  let next = 0
-  on('tool.call', (_, e) => {
-    const a = e as unknown as Record<string, unknown>
-    if (e.tool === 'TaskCreate') return { result: { task: { id: String(++next), subject: String(a.subject) } } }
-    if (e.tool === 'TaskUpdate') return { result: { success: true, taskId: String(a.taskId), updatedFields: [] } }
-    return { result: {} }
-  })
+  taskTools(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.tool.call({ tool: 'TaskCreate', subject: 'a', description: 'a' })
