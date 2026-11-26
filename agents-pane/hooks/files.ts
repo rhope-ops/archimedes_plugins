@@ -25,6 +25,36 @@ export const ROLE_NAMED: Record<Role, string> = {
   explore: 'gray',
 }
 
+// Model family colors: one each, apart from the role colors and the state colors.
+export type Family = 'fable' | 'opus' | 'sonnet' | 'haiku' | 'other'
+export function familyOf(model: string | null): Family {
+  const m = /(fable|opus|sonnet|haiku)/i.exec(model ?? '')
+  return m ? (m[1]?.toLowerCase() as Family) : 'other'
+}
+export const MODEL_HEX: Record<Family, string> = {
+  fable: '#c9a227',
+  opus: '#c2703d',
+  sonnet: '#4a8fc2',
+  haiku: '#7fa650',
+  other: '#8a94a6',
+}
+export const MODEL_NAMED: Record<Family, string> = {
+  fable: 'yellowBright',
+  opus: 'redBright',
+  sonnet: 'blue',
+  haiku: 'greenBright',
+  other: 'gray',
+}
+
+// The agent type shown beside the role tag: only when it says more than the role word does.
+export function typeLabel(type: string): string {
+  const t = type.trim()
+  const role = roleOf(t)
+  const bare = t.toLowerCase().replace(/[-_\s]+/g, '')
+  if (bare === role || bare === `${role}s` || bare === 'generalpurpose' || bare === 'main') return ''
+  return t
+}
+
 // Diff colors: added and removed lines, and the stronger mark on the changed words.
 export const DIFF = {
   addBg: '#2ea86522',

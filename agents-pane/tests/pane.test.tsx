@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { diff, lineOf, markOf } from '../hooks/diff'
-import { change, commit, roleOf, touch, utf8Bytes } from '../hooks/files'
+import { MODEL_HEX, change, commit, familyOf, roleOf, touch, typeLabel, utf8Bytes } from '../hooks/files'
 import { costRecord, isSafeId, splitCells, sync, tokensText } from '../hooks/pricing'
 
 const PANE = {
@@ -82,7 +82,8 @@ test('totals, token split, per-type rows and a card for each agent; live first',
     expect(all).toContain('$1.23')
     expect(all).toContain('<$0.01')
     // 2,000 + 3,000 + 1,000 + 500 tokens per agent; 13k in all.
-    expect(all).toContain('6.5k tok · in 2.0k · out 3.0k · cache 1.0kr / 500w')
+    // Tokens: the total, then each part with its label.
+    for (const part of ['6.5k tok', 'in 2.0k', 'out 3.0k', 'cache r 1.0k', 'w 500']) expect(all).toContain(part)
     expect(texts).toContain('13.0k')
     expect(texts).toContain('4.0k · 6.0k')
     expect(texts).toContain('2.0k · 1.0k')
@@ -454,4 +455,28 @@ test('review fixes: a one-line change in a long file stays one line; each lane s
   expect(commit(l)[0]?.by.e1?.state).toBe('read')
 
   expect(utf8Bytes('aé日🙂')).toBe(1 + 2 + 3 + 4)
+})
+
+test('card: the role once, the model in its family color, the status word in its color', async ($, on) => {
+  const now = Date.now()
+  await setup($, on, () => [agent('r1', 'running', 0.5, now - 5_000, 'reviewer'), agent('g1', 'completed', 0.1, now - 9_000, 'general-purpose')])
+  await poke($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  // In each card the role shows once; a type that adds nothing ("reviewer", "general-purpose") is left out.
+  const r1 = (await ui.find({ key: 'r1' }))?.text ?? ''
+  expect(r1.match(/reviewer/gi)?.length).toBe(1)
+  expect((await ui.find({ key: 'g1' }))?.text).not.toContain('general-purpose')
+  expect(texts.length).toBeGreaterThan(0)
+  const model = (await ui.findAll({ type: 'Text', text: 'sonnet 5.5' }))
+  expect(model.length).toBe(2)
+  expect(model.every(m => m.props.color === MODEL_HEX.sonnet)).toBe(true)
+  const words = await ui.findAll({ type: 'Text', text: /^(running|done)$/ })
+  expect(words.map(w => `${w.text}:${String(w.props.color)}`).sort()).toEqual(['done:success', 'running:suggestion'])
+  await ui.unmount()
+  expect(familyOf('claude-opus-5-5')).toBe('opus')
+  expect(familyOf(null)).toBe('other')
+  expect(typeLabel('Explore')).toBe('')
+  expect(typeLabel('code-reviewer')).toBe('code-reviewer')
+  expect(typeLabel('db-migrator')).toBe('db-migrator')
 })
