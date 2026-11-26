@@ -9,21 +9,15 @@ async function total($: EngineInterface): Promise<number> {
   return typeof v === 'number' ? v : 0
 }
 
-// Quiet until the advisor is used: no status entry before the first call of the session,
-// then one short entry. /advisor-stats gives the all-time count.
-function show($: EngineInterface, session: number): void {
-  $.ui.status(session > 0 ? `advisor ×${session}` : undefined)
-}
-
+// Counts only: the task-progress band shows "advisor ×N" while a turn runs.
+// No status line and no toast. /advisor-stats gives the session and all-time counts.
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'advisor-stats',
       description: 'Show how often the advisor was consulted',
     })
-    const result = await next(e)
-    show($, await read($, sessionCount))
-    return result
+    return next(e)
   })
 
   on('command.run', { command: 'advisor-stats' }, async $ => {
@@ -39,12 +33,8 @@ export const register: Register = on => {
     try {
       const calls = (response.serverToolUses ?? []).filter(u => u.name === 'advisor').length
       if (calls > 0) {
-        const session = await update($, sessionCount, n => n + calls)
+        await update($, sessionCount, n => n + calls)
         await $.store.set(TOTAL_KEY, (await total($)) + calls)
-        const tier = /(fable|opus|sonnet|haiku)/i.exec(response.usage?.model ?? e.model)?.[1]?.toLowerCase() ?? e.model
-        const who = e.agentId === undefined ? 'main' : 'subagent'
-        $.ui.toast(`Advisor consulted by ${tier} (${who}) · #${session} this session`)
-        show($, session)
       }
     } catch {}
     return response

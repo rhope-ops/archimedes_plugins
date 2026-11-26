@@ -1,8 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentSnap, Ledger } from '../types'
-import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, typeColor, usdText } from './pricing'
+import type { AgentSnap, DiffLine, FileEntry, Ledger } from '../types'
+import { diff, lineOf } from './diff'
+import { COMMIT, DIFF, READS, READ_CAP, ROLES, ROLE_HEX, ROLE_NAMED, WRITES, change, commit, roleOf, shortPath, touch, utf8Bytes } from './files'
+import type { Role } from './files'
+import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, usdText } from './pricing'
 
 const PANE = 'agents-pane'
 // Moves the run times of running agents while the pane is open.
@@ -20,6 +23,12 @@ const EMPTY: Ledger = {
   limitsAt: null,
 }
 const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-4' })
+// Files the agents read and changed in this session, with capped diff hunks. Change the tag when
+// FileEntry's fields change: it declines older stored values.
+const files = atom({ plugin: 'agents-pane', key: 'files' } as const, [], { shape: 'files-3' })
+const hiddenRoles = atom({ plugin: 'agents-pane', key: 'hiddenRoles' } as const, [])
+const openFile = atom({ plugin: 'agents-pane', key: 'openFile' } as const, '')
+const TITLE = 'Agents & files'
 
 // Start the ledger over when the session id changed (/clear). The first id seen is adopted.
 // Resolves the id, so a caller can drop a reading taken under another session.
@@ -123,14 +132,81 @@ function saveCost($: EngineInterface): void {
   writes.last = writes.last.then(() => writeCost($, seq)).catch(() => {})
 }
 
+function failed(result: unknown): boolean {
+  const r = result as { deny?: string; isError?: boolean }
+  return r.deny !== undefined || r.isError === true
+}
+
+// The file's text before a change, capped; '' when it does not exist yet; null when too long to diff.
+async function before($: EngineInterface, path: string): Promise<string | null> {
+  try {
+    const text = await $.fs.read(path, { length: READ_CAP })
+    // A read stops at READ_CAP bytes: a text that long may be cut, so it gets no diff.
+    return utf8Bytes(text) >= READ_CAP - 4 ? null : text
+  } catch {
+    return ''
+  }
+}
+
+type Change = { lines: DiffLine[]; cut: number; add: number; del: number } | null
+
+// The diff of one file tool call, from its input and the file's text before it ran.
+function changeOf(tool: string, args: Record<string, unknown>, old: string | null): Change {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  if (tool === 'Edit') {
+    const d = diff(str(args.old_string), str(args.new_string), old === null ? null : lineOf(old, str(args.old_string)))
+    return d
+  }
+  if (tool === 'MultiEdit' && Array.isArray(args.edits)) {
+    const out: DiffLine[] = []
+    let add = 0
+    let del = 0
+    let cut = 0
+    for (const raw of args.edits as Record<string, unknown>[]) {
+      const d = diff(str(raw.old_string), str(raw.new_string), old === null ? null : lineOf(old, str(raw.old_string)))
+      out.push(...d.lines)
+      add += d.add
+      del += d.del
+      cut += d.cut
+    }
+    return { lines: out.slice(0, 40), cut: cut + Math.max(0, out.length - 40), add, del }
+  }
+  if (tool === 'Write' && old !== null) return diff(old, str(args.content), 1)
+  return null
+}
+
+// Record a file tool call around its run: active while it runs, then read or changed with its diff.
+async function trackFile($: EngineInterface, tool: string, args: Record<string, unknown>, path: string, agent: string, ran: unknown): Promise<void> {
+  const t = Date.now()
+  if (failed(ran) || READS.has(tool)) {
+    pending.delete(path + '\u0000' + agent)
+    await update($, files, list => touch(list, path, agent, t, false))
+    return
+  }
+  const c = changeOf(tool, args, pending.get(path + '\u0000' + agent) ?? null)
+  pending.delete(path + '\u0000' + agent)
+  await update($, files, list => change(list, path, agent, t, c === null ? null : { lines: c.lines, cut: c.cut }, c?.add ?? 0, c?.del ?? 0))
+}
+
+// File text read before a change runs, by path and agent, until the change ends.
+const pending = new Map<string, string | null>()
+
+async function startFile($: EngineInterface, tool: string, path: string, agent: string): Promise<void> {
+  const t = Date.now()
+  if (tool === 'Edit' || tool === 'MultiEdit' || tool === 'Write') pending.set(path + '\u0000' + agent, await before($, path))
+  await update($, files, list => touch(list, path, agent, t, true))
+}
+
 const runMs = (a: AgentSnap, now: number) => Math.max(0, (a.endTime ?? now) - a.startTime)
 
 export const register: Register = on => {
   let isOpened = false
   let ticker: { cancel: () => void } | undefined
+  let cwd = ''
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'agents-pane', description: 'Open the subagents pane' })
+    cwd = e.cwd
+    await $.command.register({ name: 'agents-pane', description: 'Open the agents and files pane' })
     ticker?.cancel()
     ticker = await $.clock.every(2000, async () => {
       try {
@@ -144,8 +220,8 @@ export const register: Register = on => {
 
   on('command.run', { command: 'agents-pane' }, async $ => {
     await refresh($).catch(() => {})
-    await $.ui.open({ id: PANE, title: 'Subagents' })
-    return { text: 'Subagents pane opened. Costs are Claude Code estimates, the same as /cost.' }
+    await $.ui.open({ id: PANE, title: TITLE })
+    return { text: 'Agents & files pane opened. Costs are Claude Code estimates, the same as /cost.' }
   })
 
   // Open the pane at the first spawn, then keep the ledger current on each change.
@@ -154,11 +230,37 @@ export const register: Register = on => {
     try {
       if (!isOpened) {
         isOpened = true
-        $.ui.open({ id: PANE, title: 'Subagents' }).catch(() => {})
+        $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
       }
       await refresh($)
     } catch {}
     return result
+  })
+
+  // Files: each read and change, by agent, with a diff of each change. Observe only: a failure here
+  // never stops the tool.
+  on('tool.call', async ($, e, next) => {
+    const args = e as unknown as Record<string, unknown>
+    const raw = args.file_path ?? args.notebook_path
+    const path = typeof raw === 'string' ? raw : ''
+    const isFile = path !== '' && (READS.has(e.tool) || WRITES.has(e.tool))
+    const agent = e.agentId ?? 'main'
+    if (isFile) {
+      try {
+        if (!isOpened) {
+          isOpened = true
+          $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
+        }
+        await startFile($, e.tool, path, agent)
+      } catch {}
+    }
+    const ran = await next(e)
+    try {
+      if (isFile) await trackFile($, e.tool, args, path, agent, ran)
+      const command = e.tool === 'Bash' && typeof args.command === 'string' ? args.command.trim() : ''
+      if (command !== '' && !failed(ran) && COMMIT.test(command)) await update($, files, list => commit(list))
+    } catch {}
+    return ran
   })
 
   on('turn.start', async ($, e, next) => {
@@ -198,11 +300,16 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, tick)
     const l = await read($, ledger)
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const now = Date.now()
     const isTerminal = e.surface === 'terminal'
-    const colorOf = (type: string) => typeColor(l.types.indexOf(type), isTerminal)
+    // Colors by role (worker, reviewer, explore), fixed: the same role has the same color everywhere.
+    const colorOf = (type: string) => (isTerminal ? ROLE_NAMED : ROLE_HEX)[roleOf(type)]
+    const roleColor = (r: Role) => (isTerminal ? ROLE_NAMED : ROLE_HEX)[r]
     const all = l.order.map(id => l.agents[id]).filter((a): a is AgentSnap => a !== undefined)
+    const fileList = await read($, files)
+    const hidden = new Set(await read($, hiddenRoles))
+    const open = await read($, openFile)
 
     // The whole session: the main conversation beside the subagents. The main cost is the session's /cost
     // total less the subagents', so it also holds mods' own model calls.
@@ -246,15 +353,166 @@ export const register: Register = on => {
       </Box>
     )
 
+    // ---- Files: one row per file in each agent's lane; a press opens its diff under it. ----
+    const GLYPH = { read: '○', changed: '●', committed: '✔' } as const
+    const filesOf = (agent: string) =>
+      fileList.filter(f => f.agents.includes(agent)).sort((x, y) => y.at - x.at)
+    const diffRows = (f: FileEntry, agent: string) => {
+      const hunks = f.hunks.filter(x => x.agent === agent)
+      if (hunks.length === 0) {
+        return (
+          <Box key={`d-${agent}-${f.path}`} paddingX={1}>
+            <Text dimColor size="footnote" wrap="wrap">
+              {(f.by[agent]?.state ?? 'read') === 'read' ? 'Read only. No changes.' : 'Changed. No line diff (the file is too long, or a notebook).'}
+            </Text>
+          </Box>
+        )
+      }
+      let shown = 0
+      return (
+        <Box key={`d-${agent}-${f.path}`} flexDirection="column" overflow="hidden">
+          {hunks.map((hk, hi) => {
+            const first = hk.lines.find(x => x.n !== null)?.n
+            const head = (
+              <Box key={`h${hi}`} flexDirection="row" flexWrap="nowrap" columnGap={1} paddingX={1}>
+                <Text color={roleColor(roleOf(agent === 'main' ? 'main' : l.agents[agent]?.type))}>■</Text>
+                <Text dimColor size="caption" mono wrap="clip" maxLines={1}>
+                  {first !== undefined && first !== null ? `line ${first}` : 'change'} · {since(Math.max(0, now - hk.at))} ago
+                </Text>
+              </Box>
+            )
+            const rows = hk.lines
+              .filter(() => shown++ < 60)
+              .map((x, li) => {
+                const bg = x.kind === '+' ? DIFF.addBg : x.kind === '-' ? DIFF.delBg : undefined
+                const markBg = x.kind === '+' ? DIFF.addMark : DIFF.delMark
+                const sign = x.kind === ' ' ? ' ' : x.kind
+                const n = x.n === null ? '' : String(x.n)
+                const text = x.mark ? (
+                  [
+                    <Text key="a" mono size="caption">{x.text.slice(0, x.mark[0])}</Text>,
+                    <Text key="m" mono size="caption" backgroundColor={markBg}>{x.text.slice(x.mark[0], x.mark[1])}</Text>,
+                    <Text key="z" mono size="caption">{x.text.slice(x.mark[1])}</Text>,
+                  ]
+                ) : (
+                  <Text mono size="caption">{x.text === '' ? ' ' : x.text}</Text>
+                )
+                return (
+                  <Box key={`l${hi}-${li}`} flexDirection="row" flexWrap="nowrap" {...(bg ? { backgroundColor: bg } : {})}>
+                    <Box width={5} flexShrink={0}>
+                      <Text mono size="caption" dimColor wrap="clip">{n.padStart(4, ' ')}</Text>
+                    </Box>
+                    <Box width={2} flexShrink={0}>
+                      <Text mono size="caption" color={x.kind === '+' ? DIFF.addFg : x.kind === '-' ? DIFF.delFg : undefined} wrap="clip">{sign}</Text>
+                    </Box>
+                    <Box flexDirection="row" flexWrap="nowrap" flexGrow={1} minWidth={0}>
+                      {text}
+                    </Box>
+                  </Box>
+                )
+              })
+            return [head, ...rows, ...(hk.cut > 0 ? [<Box key={`c${hi}`} paddingX={1}><Text dimColor size="caption">+{hk.cut} more lines</Text></Box>] : [])]
+          })}
+        </Box>
+      )
+    }
+    const fileRows = (agent: string, color: string) =>
+      filesOf(agent).map(f => {
+        const key = `${agent}|${f.path}`
+        const isOpen = open === key
+        // This agent's own part: its state, its counts, its tool on the file now.
+        const m = f.by[agent] ?? { state: 'read' as const, add: 0, del: 0, isActive: false }
+        const glyph = m.isActive ? '◐' : GLYPH[m.state]
+        const counts = m.add + m.del > 0 ? [`+${m.add}`, `−${m.del}`] : m.state === 'read' ? ['read', ''] : ['', '']
+        if (isTerminal) {
+          return (
+            <Text key={key} wrap="end" maxLines={1} {...(m.isActive ? { color } : { dimColor: m.state === 'read' })}>
+              {glyph} {shortPath(f.path, cwd)} {counts.filter(c => c !== '').join(' ')}
+            </Text>
+          )
+        }
+        return (
+          <Box key={key} flexDirection="column">
+            <Button key={`f-${key}`} label={shortPath(f.path, cwd)} onPress={() => update($, openFile, v => (v === key ? '' : key))}>
+              <Text color={m.isActive ? color : undefined} dimColor={!m.isActive}>
+                {isOpen ? '▾ ' : `${glyph} `}
+              </Text>
+              <Text mono size="footnote" wrap="end" maxLines={1} {...(m.state === 'read' ? { dimColor: true } : {})}>
+                {shortPath(f.path, cwd)}
+              </Text>
+              {counts[0] !== '' && (
+                <Text mono size="footnote" tabular color={counts[0]?.startsWith('+') ? DIFF.addFg : undefined} dimColor={counts[0] === 'read'}>
+                  {` ${counts[0]}`}
+                </Text>
+              )}
+              {counts[1] !== '' && (
+                <Text mono size="footnote" tabular color={DIFF.delFg}>
+                  {` ${counts[1]}`}
+                </Text>
+              )}
+            </Button>
+            {isOpen && diffRows(f, agent)}
+          </Box>
+        )
+      })
+
+    // ---- Role chips: press one to hide or show that role's lanes. ----
+    const roleCount = (r: Role) => (r === 'main' ? 1 : all.filter(a => roleOf(a.type) === r).length)
+    const chips = isTerminal ? null : (
+      <Box key="chips" flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} paddingX={1}>
+        {ROLES.filter(r => roleCount(r) > 0).map(r => (
+          <Button
+            key={`role-${r}`}
+            label={`${hidden.has(r) ? 'Show' : 'Hide'} ${r}`}
+            onPress={() => update($, hiddenRoles, list => (list.includes(r) ? list.filter(x => x !== r) : [...list, r]))}
+          >
+            <Text color={roleColor(r)} dimColor={hidden.has(r)}>■ </Text>
+            <Text size="footnote" dimColor={hidden.has(r)} strikethrough={hidden.has(r)}>
+              {r} {roleCount(r)}
+            </Text>
+          </Button>
+        ))}
+      </Box>
+    )
+
+    // ---- The main conversation's lane: its files. ----
+    const mainFiles = fileRows('main', roleColor('main'))
+    const mainLane = hidden.has('main') ? null : (
+      <Box key="lane-main" flexDirection="column" borderStyle="round" borderColor={roleColor('main')} paddingX={1}>
+        <Box flexDirection="row" flexWrap="nowrap" columnGap={1}>
+          <Text color={roleColor('main')} size="caption" weight="bold">
+            MAIN
+          </Text>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text weight="semibold" wrap="end" maxLines={1}>
+              Main conversation
+            </Text>
+          </Box>
+          <Text dimColor size="footnote" tabular wrap="clip">
+            {filesOf('main').length} files
+          </Text>
+        </Box>
+        {mainFiles.length > 0 ? (
+          mainFiles
+        ) : (
+          <Text dimColor size="footnote">
+            No files yet.
+          </Text>
+        )}
+      </Box>
+    )
+
     if (all.length === 0) {
       return (
         <Box flexDirection="column" paddingY={1} rowGap={1}>
           {sessionBlock}
+          {chips}
+          {mainLane}
           <Box flexDirection="column" paddingX={1} rowGap={1}>
             <Text weight="semibold">No subagents yet</Text>
             <Text dimColor size="footnote" wrap="wrap">
-              Each subagent shows here with its task, model, tokens, run time and cost (the same estimate as /cost). The
-              totals keep every agent of the session.
+              Each subagent shows here as a lane in its role color, with its task, tokens, cost (the same estimate as
+              /cost) and the files it reads and changes. Press a file to see its diff.
             </Text>
           </Box>
         </Box>
@@ -324,6 +582,7 @@ export const register: Register = on => {
     )
 
     const card = (a: AgentSnap) => {
+      if (hidden.has(roleOf(a.type))) return null
       const st = STATUS[a.status] ?? { icon: '·', color: 'inactive', word: a.status }
       const isLive = LIVE.includes(a.status)
       const color = colorOf(a.type)
@@ -344,6 +603,9 @@ export const register: Register = on => {
             </Text>
           </Box>
           <Box flexDirection="row" flexWrap="nowrap" columnGap={1}>
+            <Text color={color} size="caption" weight="bold" wrap="clip">
+              {roleOf(a.type).toUpperCase()}
+            </Text>
             <Text color={color} size="footnote" wrap="clip">
               {a.type}
             </Text>
@@ -362,6 +624,7 @@ export const register: Register = on => {
               {label}
             </Text>
           )}
+          {fileRows(a.id, color)}
         </Box>
       )
     }
@@ -372,6 +635,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" rowGap={1}>
         {sessionBlock}
+        {chips}
         <Box flexDirection="column" paddingX={1}>
           <Box flexDirection="row" flexWrap="nowrap" justifyContent="space-between" columnGap={1}>
             <Text weight="bold" wrap="clip">
@@ -443,6 +707,7 @@ export const register: Register = on => {
           ))}
         </Box>
 
+        {mainLane}
         {live.length > 0 && section(`ACTIVE · ${live.length}`)}
         {live.map(card)}
         {done.length > 0 && section(`FINISHED · ${done.length}`)}

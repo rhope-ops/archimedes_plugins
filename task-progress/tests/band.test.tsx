@@ -42,12 +42,11 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
     await ui.unmount()
   }
   {
-    // Desktop: one row; the bar's label carries the tool and the counts, its value the estimate.
+    // Desktop: 3 rows. Row 1 the estimate, row 2 the tool, row 3 the cell meter. No step counts.
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join(' ')
-    expect(all).toContain('Bash: Run tests')
-    expect(all).toContain('0 steps · 1 tools')
-    expect(all).toContain('ETA learning 0/5')
+    expect((await ui.find({ key: 'row1' }))?.text).toContain('ETA learning 0/5')
+    expect((await ui.find({ key: 'row2' }))?.text).toContain('Bash: Run tests')
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join(' ')).not.toContain('steps')
     await ui.unmount()
   }
   clockMs = 60_000
@@ -115,7 +114,7 @@ function taskEngine(on: Parameters<Body>[1], clock: { ms: number }) {
 async function band($: Parameters<Body>[0]) {
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   const eta = (await ui.find({ type: 'Text', text: /left|learning|longer/ }))?.text?.trim()
-  const step = (await ui.find({ type: 'Text', text: /steps/ }))?.text ?? ''
+  const step = (await ui.find({ type: 'Text', text: /task \d+ of/ }))?.text ?? ''
   await ui.unmount()
   return { eta, step }
 }
@@ -272,10 +271,13 @@ test('the band shows the goal, not "Thinking": the model summary, then the task 
     expect(all).not.toContain('Thinking')
   }
 
-  // A running tool shows after the goal, dimmed on desktop.
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
-  expect(await texts('desktop')).toContain('· Bash: Run tests')
-  expect(await texts('terminal')).toContain('Polish the subagents pane · Bash: Run tests')
+  // A running tool shows on row 2, under the goal.
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const all = await texts(surface)
+    expect(all).toContain('Polish the subagents pane')
+    expect(all).toContain('Bash: Run tests')
+  }
 
   // A task in progress names the goal instead.
   await $.tool.call({ tool: 'TaskCreate', subject: 'Fix totals', description: 'x', activeForm: 'Fixing the totals' })

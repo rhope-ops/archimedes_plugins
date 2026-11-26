@@ -7,22 +7,17 @@
     {
       "name": "task-progress",
       "source": "./task-progress",
-      "description": "Band above the prompt: what Claude does now, elapsed time, steps, tool calls and running subagents"
+      "description": "Band above the prompt, 3 rows: goal, clock and time left; the file in use and the advisor count; a cell meter colored by state"
     },
     {
       "name": "agents-pane",
       "source": "./agents-pane",
-      "description": "Side pane: each subagent with its task, model, status, tokens and estimated cost"
+      "description": "Side pane of agents and files: a lane per agent colored by role, with tokens, cost, the files it touches and their diffs"
     },
     {
       "name": "advisor-watch",
       "source": "./advisor-watch",
-      "description": "Toast and status line each time the advisor model is consulted, with the caller's model"
-    },
-    {
-      "name": "file-tree",
-      "source": "./file-tree",
-      "description": "Side pane of the files Claude reads, changes and commits, live"
+      "description": "Counts advisor calls; /advisor-stats shows the session and all-time counts"
     },
     {
       "name": "cache-tax",
@@ -30,5 +25,5 @@
       "description": "Band that warns before the prompt cache goes cold and says how much the next message re-reads"
     }
   ],
-  "description": "Claude Code mods that show what Claude does now: progress, subagents, advisor calls, files, cache"
+  "description": "Claude Code mods that show what Claude does now: progress, agents, files, advisor calls, cache"
 }

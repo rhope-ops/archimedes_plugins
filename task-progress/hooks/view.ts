@@ -98,15 +98,6 @@ export function row1(
   return { head: h, pct: '', tail: t, inline: '', barWidth: room - cells(t) }
 }
 
-// Fit row 2 to exactly `width` cells: what runs now at the left, the counts at the right.
-export function row2(width: number, current: string, counts: string): { left: string; space: string; right: string } {
-  const w = Math.max(0, Math.floor(width))
-  const right = fit(counts, Math.max(0, w - 11))
-  const left = fit(current, Math.max(0, w - cells(right) - 1))
-  const space = ' '.repeat(Math.max(0, w - cells(left) - cells(right)))
-  return { left, space, right }
-}
-
 // The verdict on a finished turn's first estimate: on target, slower or faster, with a color.
 // Symmetric: ✓ when the larger time is at most 1.25× the smaller, in either direction.
 // The color comes from the shown (rounded) number, so "2.0×" is always yellow.
@@ -117,4 +108,95 @@ export function verdict(predictedMs: number, actualMs: number): { text: string; 
   if (ratio <= 1.25) return { text: '✓', color: 'success' }
   const times = ratio < 10 ? ratio.toFixed(1) : String(Math.round(ratio))
   return { text: `${times}× ${a > p ? 'slower' : 'faster'}`, color: Number(times) <= 2 ? 'warning' : 'error' }
+}
+
+// ---- 0.8.0: one boxy bar in every state, colored by state ----
+
+// The band's state. One color each, the same on every surface:
+// learning (no ETA yet), running, over (longer than the estimate, or done off target),
+// ok (done on target, or done with no estimate), fail (stopped, refused or an error).
+export type BandState = 'learning' | 'running' | 'over' | 'ok' | 'fail'
+
+export const STATE_HEX: Record<BandState, string> = {
+  learning: '#7b8db3',
+  running: '#3b7ddd',
+  over: '#d49a1f',
+  ok: '#2ea865',
+  fail: '#e05252',
+}
+export const STATE_NAMED: Record<BandState, string> = {
+  learning: 'gray',
+  running: 'cyan',
+  over: 'yellow',
+  ok: 'green',
+  fail: 'red',
+}
+
+// `est` is the estimate's kind while running; `outcome` the turn's end word; `verdictColor` the
+// verdict's color when the turn ended with an answer and had a first estimate.
+export function stateOf(
+  isRunning: boolean,
+  est: 'eta' | 'over' | 'learning',
+  outcome: string,
+  verdictColor: string | null,
+): BandState {
+  if (isRunning) return est === 'eta' ? 'running' : est === 'over' ? 'over' : 'learning'
+  if (outcome !== 'Done') return 'fail'
+  return verdictColor === null || verdictColor === 'success' ? 'ok' : 'over'
+}
+
+// The next shown fill: eases toward the target and never goes back inside a turn.
+// A gap under half a percent closes at once, so the bar rests on the target.
+export function ease(shown: number, target: number | null): number {
+  const s = Math.min(1, Math.max(0, Number.isFinite(shown) ? shown : 0))
+  if (target === null || !Number.isFinite(target)) return s
+  const t = Math.min(1, Math.max(0, target))
+  if (t <= s) return s
+  const gap = t - s
+  return gap < 0.005 ? t : s + gap * 0.2
+}
+
+// The cell meter: `n` cells, each on, edge (part filled) or off. While learning, a block of
+// `block` cells sweeps along the row; `tick` moves it one cell.
+export type Cell = 'on' | 'edge' | 'off'
+export function meter(n: number, frac: number | null, tick: number, block = 6): Cell[] {
+  const count = Math.max(0, Math.floor(n))
+  if (frac === null) {
+    const span = count + block
+    const at = (((tick % span) + span) % span) - block
+    return Array.from({ length: count }, (_, i) => (i >= at && i < at + block ? 'on' : 'off'))
+  }
+  const filled = Math.min(1, Math.max(0, frac)) * count
+  const full = Math.floor(filled)
+  return Array.from({ length: count }, (_, i) => (i < full ? 'on' : i === full && filled - full >= 0.25 ? 'edge' : 'off'))
+}
+
+// What an agent does, by its type. Fixed colors per role, never reused for a state.
+export type Role = 'main' | 'worker' | 'reviewer' | 'explore'
+export function roleOf(type: string | undefined): Role {
+  if (type === undefined || type === '' || type === 'main') return 'main'
+  const t = type.toLowerCase()
+  if (t.includes('review')) return 'reviewer'
+  if (t === 'explore' || t === 'plan' || t.includes('explor') || t.includes('research')) return 'explore'
+  return 'worker'
+}
+export const ROLE_HEX: Record<Role, string> = {
+  main: '#8b6cff',
+  worker: '#14a8a2',
+  reviewer: '#d9479c',
+  explore: '#8a98ae',
+}
+export const ROLE_NAMED: Record<Role, string> = {
+  main: 'blueBright',
+  worker: 'cyanBright',
+  reviewer: 'magenta',
+  explore: 'gray',
+}
+
+// A path to show: relative to the session folder when inside it, else the last 3 parts.
+export function shortPath(path: string, cwd: string): string {
+  const root = cwd.endsWith('/') ? cwd : `${cwd}/`
+  if (cwd !== '' && cwd !== '/' && path.startsWith(root)) return path.slice(root.length)
+  const parts = path.split('/').filter(p => p !== '')
+  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : path
 }

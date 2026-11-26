@@ -30,6 +30,16 @@ export type Progress = {
   predictedMs: number | null
   // Tasks that became completed during this turn.
   completedInTurn: string[]
+  // The bar's shown fill (0..1): eases toward the estimate and never goes back in a turn.
+  shownFrac: number
+  // The file a tool works on now (any agent), how, and the role of that agent; '' when none.
+  file: string
+  fileVerb: string
+  fileRole: string
+  // Files changed by a tool call that worked in this turn.
+  changed: string[]
+  // Advisor calls in this turn.
+  advisor: number
 }
 
 // One finished main-loop turn. No prompt text: only its length.
@@ -49,6 +59,10 @@ declare module 'claude-code' {
       tasks: Shaped<TaskList>
       now: number
       isHidden: boolean
+      // Advisor calls in this session.
+      advisorSession: number
+      // Subagent id -> its type, from each spawn.
+      agentTypes: Record<string, string>
     }
   }
 }

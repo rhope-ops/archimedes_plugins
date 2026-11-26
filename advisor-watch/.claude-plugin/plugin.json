@@ -1,1 +1,1 @@
-{ "name": "advisor-watch", "version": "0.2.0", "description": "Toast and status line each time the advisor model is consulted, with session and all-time counts", "types": "./types/index.d.ts" }
+{ "name": "advisor-watch", "version": "0.3.0", "description": "Counts advisor calls for the session and all sessions; /advisor-stats shows them (the task-progress band shows the live count)", "types": "./types/index.d.ts" }
