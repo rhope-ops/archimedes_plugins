@@ -25,7 +25,7 @@ export const ROLE_NAMED: Record<Role, string> = {
   explore: 'gray',
 }
 
-// Model family colors: one each, apart from the role colors and the state colors.
+// Model family colors (desktop): one each, apart from the role colors and the state colors.
 export type Family = 'fable' | 'opus' | 'sonnet' | 'haiku' | 'other'
 export function familyOf(model: string | null): Family {
   const m = /(fable|opus|sonnet|haiku)/i.exec(model ?? '')
@@ -38,20 +38,17 @@ export const MODEL_HEX: Record<Family, string> = {
   haiku: '#7fa650',
   other: '#8a94a6',
 }
-export const MODEL_NAMED: Record<Family, string> = {
-  fable: 'yellowBright',
-  opus: 'redBright',
-  sonnet: 'blue',
-  haiku: 'greenBright',
-  other: 'gray',
-}
+// The terminal has too few named colors to keep models apart from roles and states: there the model
+// is bold, with no color.
 
 // The agent type shown beside the role tag: only when it says more than the role word does.
 export function typeLabel(type: string): string {
   const t = type.trim()
   const role = roleOf(t)
   const bare = t.toLowerCase().replace(/[-_\s]+/g, '')
-  if (bare === role || bare === `${role}s` || bare === 'generalpurpose' || bare === 'main') return ''
+  // Hidden when it only repeats the role ("reviewer", "review", "explorer", "workers") or says nothing.
+  const stem = role.slice(0, 6)
+  if (bare === 'generalpurpose' || bare === 'main' || (bare.startsWith(stem) && bare.length <= role.length + 2)) return ''
   return t
 }
 

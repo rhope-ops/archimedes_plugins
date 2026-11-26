@@ -83,7 +83,7 @@ test('totals, token split, per-type rows and a card for each agent; live first',
     expect(all).toContain('<$0.01')
     // 2,000 + 3,000 + 1,000 + 500 tokens per agent; 13k in all.
     // Tokens: the total, then each part with its label.
-    for (const part of ['6.5k tok', 'in 2.0k', 'out 3.0k', 'cache r 1.0k', 'w 500']) expect(all).toContain(part)
+    expect(all).toContain('6.5k tok · in 2.0k · out 3.0k · cache read 1.0k · write 500')
     expect(texts).toContain('13.0k')
     expect(texts).toContain('4.0k · 6.0k')
     expect(texts).toContain('2.0k · 1.0k')
@@ -479,4 +479,22 @@ test('card: the role once, the model in its family color, the status word in its
   expect(typeLabel('Explore')).toBe('')
   expect(typeLabel('code-reviewer')).toBe('code-reviewer')
   expect(typeLabel('db-migrator')).toBe('db-migrator')
+  expect(typeLabel('review')).toBe('')
+  expect(typeLabel('explorer')).toBe('')
+  expect(typeLabel('Plan')).toBe('Plan')
+})
+
+test('card at terminal width: the token row is one cut line, the status word stays whole', async ($, on) => {
+  const now = Date.now()
+  await setup($, on, () => [agent('r1', 'running', 0.5, now - 5_000, 'code-reviewer')])
+  await poke($)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 40 }, surface: 'terminal' })
+  const tok = await ui.find({ type: 'Text', text: /tok · in/ })
+  expect(tok?.props?.wrap).toBe('end')
+  expect(tok?.props?.maxLines).toBe(1)
+  const word = (await ui.findAll({ type: 'Text', text: 'running' })).find(w => w.props.color === 'suggestion')
+  expect(word?.props?.wrap).toBe('clip')
+  // The only shrinking part of the row holds the type.
+  expect((await ui.find({ type: 'Text', text: 'code-reviewer' }))?.props?.wrap).toBe('end')
+  await ui.unmount()
 })

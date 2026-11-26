@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, DiffLine, FileEntry, Ledger } from '../types'
 import { diff, lineOf } from './diff'
-import { COMMIT, DIFF, MODEL_HEX, MODEL_NAMED, READS, READ_CAP, ROLES, ROLE_HEX, ROLE_NAMED, WRITES, change, commit, familyOf, roleOf, shortPath, touch, typeLabel, utf8Bytes } from './files'
+import { COMMIT, DIFF, MODEL_HEX, READS, READ_CAP, ROLES, ROLE_HEX, ROLE_NAMED, WRITES, change, commit, familyOf, roleOf, shortPath, touch, typeLabel, utf8Bytes } from './files'
 import type { Role } from './files'
 import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, usdText } from './pricing'
 
@@ -606,41 +606,36 @@ export const register: Register = on => {
             <Text color={color} size="caption" weight="bold" wrap="clip">
               {roleOf(a.type).toUpperCase()}
             </Text>
-            {typeLabel(a.type) !== '' && (
-              <Text dimColor size="footnote" wrap="clip">
-                {typeLabel(a.type)}
-              </Text>
-            )}
-            <Text color={(isTerminal ? MODEL_NAMED : MODEL_HEX)[familyOf(a.model)]} size="footnote" weight="semibold" wrap="clip">
+            {/* What gives way on a narrow card: the type first; the model, the status and the time stay whole. */}
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              {typeLabel(a.type) !== '' && (
+                <Text dimColor size="footnote" wrap="end" maxLines={1}>
+                  {typeLabel(a.type)}
+                </Text>
+              )}
+            </Box>
+            <Text {...(isTerminal ? {} : { color: MODEL_HEX[familyOf(a.model)] })} size="footnote" weight="semibold" wrap="clip">
               {shortModel(a.model)}
             </Text>
-            <Box flexGrow={1} flexShrink={1} minWidth={0}>
-              <Text color={st.color} size="footnote" wrap="end" maxLines={1}>
-                {st.word}
-              </Text>
-            </Box>
+            <Text color={st.color} size="footnote" wrap="clip">
+              {st.word}
+            </Text>
             <Text dimColor size="footnote" tabular wrap="clip">
               {since(runMs(a, now))}
             </Text>
           </Box>
-          <Box key="tok" flexDirection="row" flexWrap="nowrap" columnGap={1}>
-            <Text size="footnote" weight="semibold" tabular wrap="clip">
-              {tokensText(total)} tok
-            </Text>
-            {(
-              [
-                ['in', tokensText(t.input)],
-                ['out', tokensText(t.output)],
-                ['cache r', tokensText(t.cacheRead)],
-                ['w', tokensText(t.cacheWrite)],
-              ] as const
-            ).map(([k, v]) => (
-              <Text key={k} size="footnote" tabular wrap="clip">
-                <Text dimColor>{k} </Text>
-                {v}
-              </Text>
-            ))}
-          </Box>
+          {/* One Text, so a narrow card ends the row with … instead of cutting a number. */}
+          <Text key="tok" size="footnote" tabular wrap="end" maxLines={1}>
+            <Text weight="semibold">{tokensText(total)} tok</Text>
+            <Text dimColor> · in </Text>
+            {tokensText(t.input)}
+            <Text dimColor> · out </Text>
+            {tokensText(t.output)}
+            <Text dimColor> · cache read </Text>
+            {tokensText(t.cacheRead)}
+            <Text dimColor> · write </Text>
+            {tokensText(t.cacheWrite)}
+          </Text>
           {isLive && label !== '' && label !== a.description && (
             <Text italic dimColor size="footnote" wrap="end" maxLines={1}>
               {label}
