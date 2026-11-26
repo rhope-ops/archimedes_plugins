@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentSnap, DiffLine, FileEntry, Ledger } from '../types'
 import { diff, lineOf } from './diff'
-import { COMMIT, DIFF, READS, READ_CAP, ROLES, ROLE_HEX, ROLE_NAMED, WRITES, change, commit, roleOf, shortPath, touch } from './files'
+import { COMMIT, DIFF, READS, READ_CAP, ROLES, ROLE_HEX, ROLE_NAMED, WRITES, change, commit, roleOf, shortPath, touch, utf8Bytes } from './files'
 import type { Role } from './files'
 import { addUsage, costRecord, isSafeId, limitsOf, since, snapOf, splitCells, splitTotal, sync, tokensText, usdText } from './pricing'
 
@@ -25,7 +25,7 @@ const EMPTY: Ledger = {
 const ledger = atom({ plugin: 'agents-pane', key: 'ledger' } as const, EMPTY, { shape: 'ledger-4' })
 // Files the agents read and changed in this session, with capped diff hunks. Change the tag when
 // FileEntry's fields change: it declines older stored values.
-const files = atom({ plugin: 'agents-pane', key: 'files' } as const, [], { shape: 'files-2' })
+const files = atom({ plugin: 'agents-pane', key: 'files' } as const, [], { shape: 'files-3' })
 const hiddenRoles = atom({ plugin: 'agents-pane', key: 'hiddenRoles' } as const, [])
 const openFile = atom({ plugin: 'agents-pane', key: 'openFile' } as const, '')
 const TITLE = 'Agents & files'
@@ -141,7 +141,8 @@ function failed(result: unknown): boolean {
 async function before($: EngineInterface, path: string): Promise<string | null> {
   try {
     const text = await $.fs.read(path, { length: READ_CAP })
-    return text.length >= READ_CAP - 4 ? null : text
+    // A read stops at READ_CAP bytes: a text that long may be cut, so it gets no diff.
+    return utf8Bytes(text) >= READ_CAP - 4 ? null : text
   } catch {
     return ''
   }
@@ -178,6 +179,7 @@ function changeOf(tool: string, args: Record<string, unknown>, old: string | nul
 async function trackFile($: EngineInterface, tool: string, args: Record<string, unknown>, path: string, agent: string, ran: unknown): Promise<void> {
   const t = Date.now()
   if (failed(ran) || READS.has(tool)) {
+    pending.delete(path + '\u0000' + agent)
     await update($, files, list => touch(list, path, agent, t, false))
     return
   }
@@ -361,7 +363,7 @@ export const register: Register = on => {
         return (
           <Box key={`d-${agent}-${f.path}`} paddingX={1}>
             <Text dimColor size="footnote" wrap="wrap">
-              {f.state === 'read' ? 'Read only. No changes.' : 'Changed. No line diff (the file is too long, or a notebook).'}
+              {(f.by[agent]?.state ?? 'read') === 'read' ? 'Read only. No changes.' : 'Changed. No line diff (the file is too long, or a notebook).'}
             </Text>
           </Box>
         )
@@ -418,11 +420,13 @@ export const register: Register = on => {
       filesOf(agent).map(f => {
         const key = `${agent}|${f.path}`
         const isOpen = open === key
-        const glyph = f.isActive ? '◐' : GLYPH[f.state]
-        const counts = f.add + f.del > 0 ? [`+${f.add}`, `−${f.del}`] : f.state === 'read' ? ['read', ''] : ['', '']
+        // This agent's own part: its state, its counts, its tool on the file now.
+        const m = f.by[agent] ?? { state: 'read' as const, add: 0, del: 0, isActive: false }
+        const glyph = m.isActive ? '◐' : GLYPH[m.state]
+        const counts = m.add + m.del > 0 ? [`+${m.add}`, `−${m.del}`] : m.state === 'read' ? ['read', ''] : ['', '']
         if (isTerminal) {
           return (
-            <Text key={key} wrap="end" maxLines={1} {...(f.isActive ? { color } : { dimColor: f.state === 'read' })}>
+            <Text key={key} wrap="end" maxLines={1} {...(m.isActive ? { color } : { dimColor: m.state === 'read' })}>
               {glyph} {shortPath(f.path, cwd)} {counts.filter(c => c !== '').join(' ')}
             </Text>
           )
@@ -430,10 +434,10 @@ export const register: Register = on => {
         return (
           <Box key={key} flexDirection="column">
             <Button key={`f-${key}`} label={shortPath(f.path, cwd)} onPress={() => update($, openFile, v => (v === key ? '' : key))}>
-              <Text color={f.isActive ? color : undefined} dimColor={!f.isActive}>
+              <Text color={m.isActive ? color : undefined} dimColor={!m.isActive}>
                 {isOpen ? '▾ ' : `${glyph} `}
               </Text>
-              <Text mono size="footnote" wrap="end" maxLines={1} {...(f.state === 'read' ? { dimColor: true } : {})}>
+              <Text mono size="footnote" wrap="end" maxLines={1} {...(m.state === 'read' ? { dimColor: true } : {})}>
                 {shortPath(f.path, cwd)}
               </Text>
               {counts[0] !== '' && (

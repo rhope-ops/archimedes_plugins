@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { diff, lineOf, markOf } from '../hooks/diff'
-import { change, commit, roleOf, touch } from '../hooks/files'
+import { change, commit, roleOf, touch, utf8Bytes } from '../hooks/files'
 import { costRecord, isSafeId, splitCells, sync, tokensText } from '../hooks/pricing'
 
 const PANE = {
@@ -434,4 +434,24 @@ test('pane: files in the lane of the agent that touched them; a press opens the 
   expect((await term.find({ type: 'Text', text: /a\.ts/ }))?.text).toContain('○')
   expect((await term.find({ type: 'Text', text: /b\.ts/ }))?.text).toContain('✔')
   await term.unmount()
+})
+
+test('review fixes: a one-line change in a long file stays one line; each lane shows its own part', async () => {
+  const before = Array.from({ length: 300 }, (_, i) => `line ${i}`)
+  const after = [...before]
+  after[150] = 'changed'
+  const d = diff(before.join('\n'), after.join('\n'), 1)
+  expect([d.add, d.del]).toEqual([1, 1])
+  expect(d.lines.filter(l => l.kind !== ' ').map(l => `${l.kind}${l.n}`)).toEqual(['-151', '+151'])
+  // A huge single line is clipped.
+  expect(diff('x', 'y'.repeat(5000), 1).lines[1]?.text.length).toBe(400)
+
+  let l = touch([], '/r/a.ts', 'e1', 1, false)
+  l = change(l, '/r/a.ts', 'main', 2, null, 5, 2)
+  expect(l[0]?.by.e1).toEqual({ state: 'read', add: 0, del: 0, isActive: false })
+  expect(l[0]?.by.main).toEqual({ state: 'changed', add: 5, del: 2, isActive: false })
+  expect(commit(l)[0]?.by.main?.state).toBe('committed')
+  expect(commit(l)[0]?.by.e1?.state).toBe('read')
+
+  expect(utf8Bytes('aé日🙂')).toBe(1 + 2 + 3 + 4)
 })

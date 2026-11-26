@@ -20,7 +20,28 @@ function splitLines(text: string): string[] {
 
 type Op = { kind: ' ' | '+' | '-'; text: string; oldN: number; newN: number }
 
+// The longest line kept in a diff, in characters (a minified file has one huge line).
+const MAX_TEXT = 400
+const clip = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT - 1)}…` : s)
+
+// Common leading and trailing lines are kept as they are; only the middle goes through the LCS,
+// so a one-line change in a long file stays a one-line change.
 function ops(a: string[], b: string[]): Op[] {
+  let pre = 0
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++
+  let suf = 0
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++
+  const head: Op[] = a.slice(0, pre).map((text, i) => ({ kind: ' ', text, oldN: i, newN: i }))
+  const tail: Op[] = a.slice(a.length - suf).map((text, i) => ({ kind: ' ', text, oldN: a.length - suf + i, newN: b.length - suf + i }))
+  const mid = middle(a.slice(pre, a.length - suf), b.slice(pre, b.length - suf)).map(o => ({
+    ...o,
+    oldN: o.oldN < 0 ? o.oldN : o.oldN + pre,
+    newN: o.newN < 0 ? o.newN : o.newN + pre,
+  }))
+  return [...head, ...mid, ...tail]
+}
+
+function middle(a: string[], b: string[]): Op[] {
   const m = a.length
   const n = b.length
   if (m * n > MAX_CELLS) {
@@ -110,18 +131,18 @@ export function diff(before: string, after: string, firstLine: number | null): D
       removed.forEach((x, idx) => {
         const pair = added[idx]
         const mark = pair ? markOf(x.text, pair.text) : null
-        lines.push({ kind: '-', n: firstLine === null ? null : firstLine + x.oldN, text: x.text, ...(mark ? { mark } : {}) })
+        lines.push({ kind: '-', n: firstLine === null ? null : firstLine + x.oldN, text: clip(x.text), ...(mark && mark[1] <= MAX_TEXT ? { mark } : {}) })
       })
       added.forEach((y, idx) => {
         const pair = removed[idx]
         const mark = pair ? markOf(y.text, pair.text) : null
-        lines.push({ kind: '+', n: firstLine === null ? null : firstLine + y.newN, text: y.text, ...(mark ? { mark } : {}) })
+        lines.push({ kind: '+', n: firstLine === null ? null : firstLine + y.newN, text: clip(y.text), ...(mark && mark[1] <= MAX_TEXT ? { mark } : {}) })
       })
       k = s
       continue
     }
     const n = o.kind === '+' ? o.newN : o.oldN
-    lines.push({ kind: o.kind, n: firstLine === null ? null : firstLine + n, text: o.text })
+    lines.push({ kind: o.kind, n: firstLine === null ? null : firstLine + n, text: clip(o.text) })
     k++
   }
   const cut = Math.max(0, lines.length - MAX_LINES)

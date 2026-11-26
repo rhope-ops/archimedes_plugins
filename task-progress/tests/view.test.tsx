@@ -70,13 +70,13 @@ const BAND = (bodyColumns: number, maxRows: number) =>
 type Body = Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>
 
 // An engine stand-in: a settable clock, a store, and a turn.step that can report advisor calls.
-function engine(on: Parameters<Body>[1], clock: { ms: number }, advisorCalls: { n: number }) {
+function engine(on: Parameters<Body>[1], clock: { ms: number }, advisorCalls: { n: number }, hasTools = true) {
   const store = new Map<string, unknown>()
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('tool.call', () => ({ result: {} }))
+  if (hasTools) on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'w1', model: 'sonnet' }) as never)
   on('clock.every', () => ({ value: undefined }))
   on('clock.after', () => ({ value: undefined }))
@@ -307,4 +307,30 @@ test('the verdict color matches the shown, rounded number', async () => {
   expect(verdict(100_000, 204_000)).toEqual({ text: '2.0× slower', color: 'warning' })
   expect(verdict(204_000, 100_000)).toEqual({ text: '2.0× faster', color: 'warning' })
   expect(verdict(100_000, 210_000)).toEqual({ text: '2.1× slower', color: 'error' })
+})
+
+test('review fix: the bar keeps its fill when the estimate goes away mid-turn', async ($, on) => {
+  const clock = { ms: 0 }
+  engine(on, clock, { n: 0 }, false)
+  let next = 0
+  on('tool.call', (_, e) => {
+    const a = e as unknown as Record<string, unknown>
+    if (e.tool === 'TaskCreate') return { result: { task: { id: String(++next), subject: String(a.subject) } } }
+    if (e.tool === 'TaskUpdate') return { result: { success: true, taskId: String(a.taskId), updatedFields: [] } }
+    return { result: {} }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'a', description: 'a' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'b', description: 'b' })
+  clock.ms = 30_000
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  // Let the ticker ease the fill up toward 50%.
+  await new Promise(r => setTimeout(r, 1200))
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'completed' })
+  const ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
+  expect((await ui.find({ key: 'row1' }))?.text).not.toContain('learning')
+  const cs = (await ui.findAll({ type: 'Box' })).filter(b => /^c\d+$/.test(b.key ?? ''))
+  expect(cs.filter(c => c.props.backgroundColor === STATE_HEX.running).length).toBeGreaterThan(6)
+  await ui.unmount()
 })

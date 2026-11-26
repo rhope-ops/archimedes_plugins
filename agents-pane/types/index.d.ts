@@ -60,7 +60,11 @@ export type FileEntry = {
   add: number
   del: number
   hunks: FileHunk[]
+  // What each agent did to it: its own state, line counts and whether its tool runs on it now.
+  by: Record<string, AgentFile>
 }
+
+export type AgentFile = { state: 'read' | 'changed' | 'committed'; add: number; del: number; isActive: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

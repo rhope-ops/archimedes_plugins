@@ -291,7 +291,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     if (e.agentId === undefined) {
       // Between tools nothing runs: the band shows the goal alone, not the word "Thinking".
-      await patch($, p => ({ ...p, steps: p.steps + 1, current: '' }))
+      // The main agent's file ends with its tool: clear it too.
+      await patch($, p => ({ ...p, steps: p.steps + 1, current: '', ...(p.fileRole === 'main' ? { file: '', fileVerb: '', fileRole: '' } : {}) }))
     }
     const response = yield* next(e)
     // The advisor is a server tool: it shows in the step's result, never as a tool call.
@@ -299,7 +300,7 @@ export const register: Register = on => {
       const calls = (response.serverToolUses ?? []).filter(u => u.name === 'advisor').length
       if (calls > 0) {
         await update($, advisorSession, n => n + calls)
-        await patch($, p => ({ ...p, advisor: p.advisor + calls }))
+        await patch($, p => (p.isRunning ? { ...p, advisor: p.advisor + calls } : p))
       }
     } catch {}
     return response
@@ -388,16 +389,23 @@ export const register: Register = on => {
     // The state, its color, and the fill.
     const est = p.isRunning ? estimate(live.history, p.promptChars, elapsedMs, plan) : null
     const v = !p.isRunning && p.outcome === 'Done' && p.predictedMs !== null ? verdict(p.predictedMs, elapsedMs) : null
-    const state: BandState = stateOf(p.isRunning, est?.kind === 'eta' ? 'eta' : est?.kind === 'over' ? 'over' : 'learning', p.outcome, v?.color ?? null)
+    // An estimate can vanish mid-turn (the last task done with too little history): then the bar
+    // keeps its fill and its running color instead of going back to the learning sweep.
+    const isLost = p.isRunning && est?.kind === 'learning' && p.shownFrac > 0
+    const state: BandState = isLost
+      ? 'running'
+      : stateOf(p.isRunning, est?.kind === 'eta' ? 'eta' : est?.kind === 'over' ? 'over' : 'learning', p.outcome, v?.color ?? null)
     const target = est === null ? null : targetOf(est, elapsedMs)
     // Running: the eased fill (the estimate itself before the first tick); null while learning.
     // Done: full. Stopped or failed: where it stood.
     const frac: number | null = p.isRunning
       ? target === null
-        ? null
+        ? isLost
+          ? p.shownFrac
+          : null
         : live.hasTicked
           ? p.shownFrac
-          : target
+          : Math.max(p.shownFrac, target)
       : p.outcome === 'Done'
         ? 1
         : p.shownFrac
@@ -411,7 +419,7 @@ export const register: Register = on => {
     let learning = ''
     if (est?.kind === 'eta') eta = `~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
     else if (est?.kind === 'over') eta = 'longer than usual'
-    else if (est !== null) learning = `ETA learning ${est.samples}/${MIN_SAMPLES}`
+    else if (est !== null && !isLost) learning = `ETA learning ${est.samples}/${MIN_SAMPLES}`
     else if (v !== null) eta = `est ${duration(p.predictedMs ?? 0)} ${v.text}`
     else eta = p.outcome
     const percent = p.isRunning && frac !== null && frac < 1 && est?.kind === 'eta' ? `${Math.round(frac * 100)}%` : ''
@@ -561,8 +569,11 @@ export const register: Register = on => {
     if (rows < 3) return <Box flexDirection="column">{row1}{barRow}</Box>
 
     // Row 2: what is worked on at the left (the role in its color), the advisor at the right.
-    const rightT = advisorText !== '' ? `${advisorText}${pips !== '' ? ` ${pips}` : ''}` : ''
-    const whoT = who !== '' ? `■ ${who}` : ''
+    // What gives way on a narrow row: the pips, then the advisor count, then the role.
+    let rightT = advisorText !== '' ? `${advisorText}${pips !== '' ? ` ${pips}` : ''}` : ''
+    if (cellWidth(rightT) + 12 > width) rightT = advisorText
+    if (cellWidth(rightT) + 12 > width) rightT = ''
+    const whoT = who !== '' && cellWidth(`■ ${who}`) + cellWidth(rightT) + 2 <= width ? `■ ${who}` : ''
     const leftT = fit(left, Math.max(0, width - cellWidth(whoT) - cellWidth(rightT) - 1))
     const space2 = gap(cellWidth(whoT) + cellWidth(leftT), cellWidth(rightT), width)
     return (

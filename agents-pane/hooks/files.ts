@@ -1,6 +1,6 @@
 // Pure parts of the file list: roles, the list's caps, and how a touch, a change and a commit update it.
 
-import type { FileEntry, FileHunk } from '../types'
+import type { AgentFile, FileEntry, FileHunk } from '../types'
 
 // What an agent does, by its type. Fixed colors per role (the task-progress band uses the same).
 export type Role = 'main' | 'worker' | 'reviewer' | 'explore'
@@ -48,15 +48,23 @@ export const COMMIT = /(^|[;&|]\s*)git\s+((-[cC]\s+\S+|--?[\w-]+(=\S+)?)\s+)*com
 
 function upsert(list: readonly FileEntry[], path: string, fn: (f: FileEntry) => FileEntry): FileEntry[] {
   const old = list.find(f => f.path === path)
-  const base: FileEntry = old ?? { path, state: 'read', isActive: false, at: 0, agents: [], add: 0, del: 0, hunks: [] }
+  const base: FileEntry = old ?? { path, state: 'read', isActive: false, at: 0, agents: [], add: 0, del: 0, hunks: [], by: {} }
   return [...list.filter(f => f.path !== path), fn(base)].slice(-MAX_FILES)
 }
 
 const withAgent = (agents: readonly string[], agent: string) => (agents.includes(agent) ? [...agents] : [...agents, agent])
+const NONE: AgentFile = { state: 'read', add: 0, del: 0, isActive: false }
+const mine = (f: FileEntry, agent: string): AgentFile => f.by[agent] ?? NONE
 
 // A tool starts (`isActive` true) or ends (false) on a file.
 export function touch(list: readonly FileEntry[], path: string, agent: string, at: number, isActive: boolean): FileEntry[] {
-  return upsert(list, path, f => ({ ...f, isActive, at, agents: withAgent(f.agents, agent) }))
+  return upsert(list, path, f => ({
+    ...f,
+    isActive,
+    at,
+    agents: withAgent(f.agents, agent),
+    by: { ...f.by, [agent]: { ...mine(f, agent), isActive } },
+  }))
 }
 
 // A change that worked: the file counts as changed, with its hunk (newest last, capped).
@@ -78,12 +86,36 @@ export function change(
     add: f.add + add,
     del: f.del + del,
     hunks: hunk === null || hunk.lines.length === 0 ? f.hunks : [...f.hunks, { ...hunk, agent, at }].slice(-MAX_HUNKS),
+    by: { ...f.by, [agent]: { state: 'changed', add: mine(f, agent).add + add, del: mine(f, agent).del + del, isActive: false } },
   }))
 }
 
 // After a git commit that worked, the changed files count as committed.
 export function commit(list: readonly FileEntry[]): FileEntry[] {
-  return list.map(f => (f.state === 'changed' ? { ...f, state: 'committed' } : f))
+  return list.map(f =>
+    f.state === 'changed'
+      ? {
+          ...f,
+          state: 'committed',
+          by: Object.fromEntries(Object.entries(f.by).map(([k, v]) => [k, v.state === 'changed' ? { ...v, state: 'committed' } : v])),
+        }
+      : f,
+  )
+}
+
+// UTF-8 bytes of a text, without TextEncoder: the size the read cap counts.
+export function utf8Bytes(text: string): number {
+  let n = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      n += 4
+      i++
+    } else n += 3
+  }
+  return n
 }
 
 // A path to show: relative to the session folder when inside it, else the last 3 parts.
