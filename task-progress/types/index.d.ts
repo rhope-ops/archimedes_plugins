@@ -42,16 +42,6 @@ export type Progress = {
   advisor: number
 }
 
-// One finished main-loop turn. No prompt text: only its length.
-export type TurnRecord = {
-  at: number
-  ms: number
-  steps: number
-  tools: number
-  promptChars: number
-  predictedMs: number | null
-}
-
 declare module 'claude-code' {
   interface PluginState {
     'task-progress': {
@@ -63,8 +53,6 @@ declare module 'claude-code' {
       advisorSession: number
       // Subagent id -> its type, from each spawn.
       agentTypes: Record<string, string>
-      // The turn history (the same as the store's), so the band reads it after a hot reload too.
-      history: TurnRecord[]
     }
   }
 }

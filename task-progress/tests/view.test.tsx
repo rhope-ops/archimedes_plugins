@@ -101,19 +101,28 @@ function engine(on: Parameters<Body>[1], clock: { ms: number }, advisorCalls: { 
 
 const END = { reason: 'answer', answer: '', durationMs: 1, isAborted: false } as const
 
-// Five 90 s turns, so the next turn has an estimate from history.
-async function learn($: Parameters<Body>[0], clock: { ms: number }) {
-  for (const id of ['h1', 'h2', 'h3', 'h4', 'h5']) {
-    clock.ms += 1000
-    await $.turn.start({ text: 'go', turnId: id })
-    clock.ms += 90_000
-    await $.turn.complete({ turnId: id, ...END })
-  }
+// Task tools that answer as the real ones do, so a task list drives the estimate.
+function taskTools(on: Parameters<Body>[1]) {
+  let next = 0
+  on('tool.call', (_, e) => {
+    const a = e as unknown as Record<string, unknown>
+    if (e.tool === 'TaskCreate') return { result: { task: { id: String(++next), subject: String(a.subject) } } }
+    if (e.tool === 'TaskUpdate') return { result: { success: true, taskId: String(a.taskId), updatedFields: [] } }
+    return { result: {} }
+  })
+}
+
+// `n` new tasks; the first `done` of them completed at `atMs`.
+async function plan($: Parameters<Body>[0], clock: { ms: number }, n: number, done: number, atMs: number) {
+  for (let i = 0; i < n; i++) await $.tool.call({ tool: 'TaskCreate', subject: `t${i}`, description: `t${i}` })
+  clock.ms = atMs
+  for (let i = 1; i <= done; i++) await $.tool.call({ tool: 'TaskUpdate', taskId: String(i), status: 'completed' })
 }
 
 test('terminal: 3 rows, each exactly the width, in each state', async ($, on) => {
   const clock = { ms: 0 }
-  engine(on, clock, { n: 0 })
+  engine(on, clock, { n: 0 }, false)
+  taskTools(on)
   const rows = async (cols: number) => {
     const ui = await $.ui.mount({ ...BAND(cols, 3), surface: 'terminal' })
     const r = await Promise.all(['row1', 'row2', 'bar'].map(async key => (await ui.find({ key }))?.text ?? ''))
@@ -127,11 +136,11 @@ test('terminal: 3 rows, each exactly the width, in each state', async ($, on) =>
   expect((await rows(100))[0]).not.toContain('learning')
   await $.turn.complete({ turnId: 't0', ...END })
 
-  await learn($, clock)
-  clock.ms += 1000
+  // 3 tasks, 1 done at 30 s: 60 s left, so the first estimate of the turn is 1m30s.
+  clock.ms = 100_000
   await $.turn.start({ text: 'go', turnId: 't6' })
+  await plan($, clock, 3, 1, 130_000)
   await $.tool.call({ tool: 'Edit', file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' })
-  clock.ms += 30_000
   for (const cols of [40, 60, 100, 160]) {
     const r = await rows(cols)
     for (const row of r) expect(cells(row)).toBe(cols)
@@ -210,17 +219,12 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
 
 test('desktop meter: 30% lights 12 of 40 cells in blue; done lights all in green; same cells always', async ($, on) => {
   const clock = { ms: 0 }
-  engine(on, clock, { n: 0 })
+  engine(on, clock, { n: 0 }, false)
+  taskTools(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  for (const id of ['t1', 't2', 't3', 't4', 't5']) {
-    clock.ms += 1000
-    await $.turn.start({ text: 'go', turnId: id })
-    clock.ms += 100_000
-    await $.turn.complete({ turnId: id, ...END })
-  }
-  clock.ms += 1000
+  // 10 tasks, 3 done at 30 s: 70 s left, so 30% of the turn.
   await $.turn.start({ text: 'go', turnId: 't6' })
-  clock.ms += 30_000
+  await plan($, clock, 10, 3, 30_000)
   const lit = async () => {
     const ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
     const cs = (await ui.findAll({ type: 'Box' })).filter(b => /^c\d+$/.test(b.key ?? ''))
@@ -241,7 +245,8 @@ test('desktop meter: 30% lights 12 of 40 cells in blue; done lights all in green
   }
   expect(lit12).toBe(12)
 
-  clock.ms += 70_000
+  // The verdict compares the first estimate (after task 1: 30 s × 10 = 5m) with the real time.
+  clock.ms = 300_000
   await $.turn.complete({ turnId: 't6', ...END })
   cs = await lit()
   expect(cs.length).toBe(40)
@@ -342,13 +347,7 @@ test('the verdict color matches the shown, rounded number', async () => {
 test('review fix: the bar keeps its fill when the estimate goes away mid-turn', async ($, on) => {
   const clock = { ms: 0 }
   engine(on, clock, { n: 0 }, false)
-  let next = 0
-  on('tool.call', (_, e) => {
-    const a = e as unknown as Record<string, unknown>
-    if (e.tool === 'TaskCreate') return { result: { task: { id: String(++next), subject: String(a.subject) } } }
-    if (e.tool === 'TaskUpdate') return { result: { success: true, taskId: String(a.taskId), updatedFields: [] } }
-    return { result: {} }
-  })
+  taskTools(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.tool.call({ tool: 'TaskCreate', subject: 'a', description: 'a' })

@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Plan, Progress, TaskList, TurnRecord } from '../types'
-import { MIN_SAMPLES, duration, estimate, stats } from './eta'
+import type { Plan, Progress, TaskList } from '../types'
+import { duration, estimate } from './eta'
 import type { Estimate } from './eta'
 import { activeTitle, apply, applyChange, completedChange } from './tasks'
 import {
@@ -38,13 +38,7 @@ const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
 const advisorSession = atom({ plugin: 'task-progress', key: 'advisorSession' } as const, 0)
 const agentTypes = atom({ plugin: 'task-progress', key: 'agentTypes' } as const, {})
-// The turn history, held for the session too: a module variable starts over on a hot reload,
-// so the band reads it from session state, never from module memory.
-const history = atom({ plugin: 'task-progress', key: 'history' } as const, [])
 
-// Turn history across sessions, in this computer's plugin store.
-const HISTORY_KEY = 'history-v1'
-const HISTORY_MAX = 300
 // The band redraws this often while a turn runs, so the bar moves smoothly.
 const TICK_MS = 150
 // Cells of the desktop meter.
@@ -69,7 +63,7 @@ function describe(tool: string, input: Record<string, unknown>): string {
 }
 
 // Asks a small model what the turn's prompt is for, in a few words. The prompt text goes only into this
-// call; the answer stays in session state and never in the turn history.
+// call; the answer stays in session state only.
 const GOAL_SYSTEM =
   "You label what a person's request to a coding assistant is for. Reply with only the goal as a short phrase " +
   'of 3 to 7 words in sentence case: the intent, not the steps (for example "Polish the subagents pane" or ' +
@@ -80,24 +74,6 @@ export function cleanGoal(text: string): string {
   const line = (text.split('\n').find(l => l.trim() !== '') ?? '').trim()
   const bare = line.replace(/^(goal:\s*)/i, '').replace(/^["'`*]+|["'`*.]+$/g, '').trim()
   return bare.length > 60 ? `${bare.slice(0, 59)}…` : bare
-}
-
-function isRecord(x: unknown): x is TurnRecord {
-  const r = x as TurnRecord
-  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
-  return (
-    typeof r === 'object' &&
-    r !== null &&
-    num(r.ms) &&
-    r.ms >= 0 &&
-    num(r.promptChars) &&
-    (r.predictedMs === null || num(r.predictedMs))
-  )
-}
-
-async function loadHistory($: EngineInterface): Promise<TurnRecord[]> {
-  const v = await $.store.get(HISTORY_KEY)
-  return Array.isArray(v) ? v.filter(isRecord) : []
 }
 
 // Change the band's state while a turn is known; no-op before the first turn.
@@ -125,6 +101,10 @@ async function track($: EngineInterface, tool: string, args: Record<string, unkn
   if (c !== undefined) await patch($, p => (p.hasTaskChange ? p : { ...p, hasTaskChange: true }))
   if (c !== undefined && (c.added.length > 0 || c.removed.length > 0)) {
     await patch($, p => ({ ...p, completedInTurn: applyChange(p.completedInTurn, c) }))
+    // The first estimate of the turn's length, for the verdict at its end.
+    const t = await $.clock.now()
+    const list = await read($, tasks)
+    await patch($, p => (p.predictedMs !== null ? p : { ...p, predictedMs: firstGuess(t - p.startedAt, planOf(list, p.completedInTurn)) }))
   }
 }
 
@@ -138,11 +118,15 @@ function planOf(list: TaskList, completedInTurn: readonly string[]): Plan {
   }
 }
 
-// Where the bar should be now: elapsed ÷ (elapsed + time left); 1 when over; null while learning.
+// Where the bar should be now: elapsed ÷ (elapsed + time left); null with no estimate.
 function targetOf(est: Estimate, elapsedMs: number): number | null {
-  if (est.kind === 'eta') return elapsedMs / Math.max(1, elapsedMs + est.leftMs)
-  if (est.kind === 'over') return 1
-  return null
+  return est.kind === 'eta' ? elapsedMs / Math.max(1, elapsedMs + est.leftMs) : null
+}
+
+// The whole turn's length by the first estimate, or null with none yet.
+function firstGuess(elapsedMs: number, plan: Plan): number | null {
+  const est = estimate(elapsedMs, plan)
+  return est.kind === 'eta' ? elapsedMs + est.leftMs : null
 }
 
 // `hasTicked` is true once the ticker has moved the shown fill in this module's life; before that
@@ -156,11 +140,10 @@ async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> 
       const ms = await $.clock.now()
       await update($, now, () => ms)
       const list = await read($, tasks)
-      const turns = await read($, history)
       await patch($, p => {
         if (!p.isRunning) return p
         const elapsedMs = Math.max(0, ms - p.startedAt)
-        const est = estimate(turns, p.promptChars, elapsedMs, planOf(list, p.completedInTurn))
+        const est = estimate(elapsedMs, planOf(list, p.completedInTurn))
         const shownFrac = ease(p.shownFrac, targetOf(est, elapsedMs))
         return shownFrac === p.shownFrac ? p : { ...p, shownFrac }
       })
@@ -207,13 +190,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
     await $.command.register({ name: 'progress', description: 'Show or hide the task progress band' })
-    await $.command.register({
-      name: 'progress-stats',
-      description: 'Show how accurate the time-left estimate is',
-    })
     try {
-      const stored = await loadHistory($)
-      await update($, history, () => stored)
       // After a reload in the middle of a turn, start the clock again.
       const p = await read($, progress)
       if (p?.isRunning) {
@@ -227,23 +204,6 @@ export const register: Register = on => {
   on('command.run', { command: 'progress' }, async $ => {
     const hidden = await update($, isHidden, v => !v)
     return { text: hidden ? 'Task progress band hidden.' : 'Task progress band shown.' }
-  })
-
-  on('command.run', { command: 'progress-stats' }, async $ => {
-    const s = stats(await read($, history))
-    const trend =
-      s.recentError !== null && s.olderError !== null
-        ? s.recentError < s.olderError
-          ? 'better'
-          : 'not better'
-        : 'not enough turns yet'
-    return {
-      text: [
-        `Turns recorded: ${s.turns} (estimates start after ${MIN_SAMPLES}).`,
-        `Typical turn: ${duration(s.medianMs)}.`,
-        `Median error of the first estimate: last 20 turns ${pct(s.recentError)}, 20 before ${pct(s.olderError)} (${trend}).`,
-      ].join('\n'),
-    }
   })
 
   // Learn each subagent's type, so the band colors its file by role.
@@ -262,7 +222,6 @@ export const register: Register = on => {
     if (e.agentId !== undefined) return next(e)
     try {
       const t = await $.clock.now()
-      const first = estimate(await read($, history), e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
       const isShort = e.text.trim().length < MIN_GOAL_PROMPT
       await update($, now, () => t)
       await update($, progress, before => ({
@@ -278,7 +237,7 @@ export const register: Register = on => {
         hasTaskChange: false,
         outcome: '',
         promptChars: e.text.length,
-        predictedMs: first.kind === 'eta' ? first.leftMs : null,
+        predictedMs: null,
         completedInTurn: [],
         shownFrac: 0,
         file: '',
@@ -353,21 +312,6 @@ export const register: Register = on => {
       const t = await $.clock.now()
       const outcome = { answer: 'Done', aborted: 'Stopped', refusal: 'Refused', error: 'Error' }[e.reason]
       await patch($, p => ({ ...p, isRunning: false, endedAt: t, current: '', file: '', fileVerb: '', fileRole: '', outcome }))
-      // Learn only from turns that ran to an answer.
-      const p = await read($, progress)
-      if (p !== null && e.reason === 'answer') {
-        const record: TurnRecord = {
-          at: t,
-          ms: t - p.startedAt,
-          steps: p.steps,
-          tools: p.tools,
-          promptChars: p.promptChars,
-          predictedMs: p.predictedMs,
-        }
-        const turns = [...(await loadHistory($)), record].slice(-HISTORY_MAX)
-        await update($, history, () => turns)
-        await $.store.set(HISTORY_KEY, turns)
-      }
     } catch {}
     return next(e)
   })
@@ -394,14 +338,14 @@ export const register: Register = on => {
     const advisor = await read($, advisorSession)
 
     // The state, its color, and the fill.
-    const est = p.isRunning ? estimate(await read($, history), p.promptChars, elapsedMs, plan) : null
+    const est = p.isRunning ? estimate(elapsedMs, plan) : null
     const v = !p.isRunning && p.outcome === 'Done' && p.predictedMs !== null ? verdict(p.predictedMs, elapsedMs) : null
-    // An estimate can vanish mid-turn (the last task done with too little history): then the bar
+    // An estimate can vanish mid-turn (the last task done): then the bar
     // keeps its fill and its running color instead of going back to the learning sweep.
     const isLost = p.isRunning && est?.kind === 'learning' && p.shownFrac > 0
     const state: BandState = isLost
       ? 'running'
-      : stateOf(p.isRunning, est?.kind === 'eta' ? 'eta' : est?.kind === 'over' ? 'over' : 'learning', p.outcome, v?.color ?? null)
+      : stateOf(p.isRunning, est?.kind === 'eta' ? 'eta' : 'learning', p.outcome, v?.color ?? null)
     const target = est === null ? null : targetOf(est, elapsedMs)
     // Running: the eased fill (the estimate itself before the first tick); null while learning.
     // Done: full. Stopped or failed: where it stood.
@@ -424,8 +368,7 @@ export const register: Register = on => {
     const taskText = plan.total > 0 ? `task ${Math.min(plan.done + (p.isRunning ? 1 : 0), plan.total)} of ${plan.total}` : ''
     let eta = ''
     // No label while the estimate learns: the meter's sweep says it, and "n/5" told nobody anything.
-    if (est?.kind === 'eta') eta = `~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
-    else if (est?.kind === 'over') eta = 'longer than usual'
+    if (est?.kind === 'eta') eta = `~${duration(est.leftMs)} left`
     else if (est !== null) eta = ''
     else if (v !== null) eta = `est ${duration(p.predictedMs ?? 0)} ${v.text}`
     else eta = p.outcome
