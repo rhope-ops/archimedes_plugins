@@ -153,6 +153,8 @@ test('terminal: 3 rows, each exactly the width, in each state', async ($, on) =>
   await $.turn.complete({ turnId: 't6', ...END })
   const end = await rows(100)
   expect(end[0]).toContain('est 1m30s ✓')
+  // Review fix: at every width, each row is exactly that wide (no off-by-one at the column edges).
+  for (let cols = 20; cols <= 120; cols++) for (const row of await rows(cols)) expect(`${cols}:${cells(row)}:${row}`).toBe(`${cols}:${cols}:${row}`)
   expect(end[1]).toContain('1 file changed')
   expect(end[2]).toBe('█'.repeat(100))
 })

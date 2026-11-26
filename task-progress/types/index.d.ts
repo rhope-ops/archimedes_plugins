@@ -20,7 +20,7 @@ export type Progress = {
   tools: number
   current: string
   // What this turn is for, in a few words: from the in-progress task, else a short model summary of
-  // the prompt. Empty until known. Kept for this session only, never in the turn history.
+  // the prompt. Empty until known. Kept for this session only.
   goal: string
   turnId: string
   // True once a task tool call changed the list in this turn: only then does the task name the goal.

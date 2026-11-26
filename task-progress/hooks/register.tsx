@@ -100,11 +100,12 @@ async function track($: EngineInterface, tool: string, args: Record<string, unkn
   const c = change
   if (c !== undefined) await patch($, p => (p.hasTaskChange ? p : { ...p, hasTaskChange: true }))
   if (c !== undefined && (c.added.length > 0 || c.removed.length > 0)) {
-    await patch($, p => ({ ...p, completedInTurn: applyChange(p.completedInTurn, c) }))
+    // A task a background subagent closes after the turn ended counts for nothing.
+    await patch($, p => (p.isRunning ? { ...p, completedInTurn: applyChange(p.completedInTurn, c) } : p))
     // The first estimate of the turn's length, for the verdict at its end.
     const t = await $.clock.now()
     const list = await read($, tasks)
-    await patch($, p => (p.predictedMs !== null ? p : { ...p, predictedMs: firstGuess(t - p.startedAt, planOf(list, p.completedInTurn)) }))
+    await patch($, p => (!p.isRunning || p.predictedMs !== null ? p : { ...p, predictedMs: firstGuess(t - p.startedAt, planOf(list, p.completedInTurn)) }))
   }
 }
 
@@ -156,10 +157,6 @@ function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
   const mmss = `${String(Math.floor(s / 60) % 60).padStart(s >= 3600 ? 2 : 1, '0')}:${String(s % 60).padStart(2, '0')}`
   return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss}` : mmss
-}
-
-function pct(x: number | null): string {
-  return x === null ? 'n/a' : `${Math.round(x * 100)}%`
 }
 
 // The goal call of the latest turn, so a new turn cuts an older one.
@@ -524,9 +521,12 @@ export const register: Register = on => {
     const pctT = percent !== '' ? ` ${percent}` : ''
     const rightCells = cellWidth(etaT) + cellWidth(taskT) + cellWidth(pctT)
     const headT = pad(head)
-    const fitRight = rightCells + cellWidth(headT) <= width
+    const fitRight = rightCells + cellWidth(headT) + 1 <= width
     const goalT = fitRight ? fit(goal, Math.max(0, width - cellWidth(headT) - rightCells - 1)) : ''
-    const space1 = fitRight ? gap(cellWidth(headT) + cellWidth(goalT), rightCells, width) : ''
+    // No room for the right side: the head alone, padded to the width.
+    const space1 = fitRight
+      ? gap(cellWidth(headT) + cellWidth(goalT), rightCells, width)
+      : ' '.repeat(Math.max(0, width - cellWidth(fit(headT, width))))
     const row1 = (
       <Box key="row1">
         <Text color={color} weight="bold" wrap="clip">
@@ -556,8 +556,10 @@ export const register: Register = on => {
     // What gives way on a narrow row: the pips, then the advisor count, then the role.
     // A path is cut at its start, so the file name stays.
     let rightT = advisorText !== '' ? `${advisorText}${pips !== '' ? ` ${pips}` : ''}` : ''
-    if (cellWidth(rightT) + 12 > width) rightT = advisorText
-    if (cellWidth(rightT) + 12 > width) rightT = ''
+    // Keep room for the left column, one cell of text and the gap.
+    const keep = Math.max(12, col + 2)
+    if (cellWidth(rightT) + keep > width) rightT = advisorText
+    if (cellWidth(rightT) + keep > width) rightT = ''
     const whoRaw = who !== '' && cellWidth(`■ ${who}`) + cellWidth(rightT) + 2 <= width ? `■ ${who}` : ''
     const whoT = whoRaw !== '' ? pad(whoRaw) : col > 0 ? ' '.repeat(col) : ''
     const room = Math.max(0, width - cellWidth(whoT) - cellWidth(rightT) - 1)
