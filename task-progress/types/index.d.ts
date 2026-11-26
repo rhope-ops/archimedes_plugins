@@ -63,6 +63,8 @@ declare module 'claude-code' {
       advisorSession: number
       // Subagent id -> its type, from each spawn.
       agentTypes: Record<string, string>
+      // The turn history (the same as the store's), so the band reads it after a hot reload too.
+      history: TurnRecord[]
     }
   }
 }

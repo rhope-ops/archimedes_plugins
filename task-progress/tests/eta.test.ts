@@ -13,7 +13,7 @@ const turn = (ms: number, promptChars = 50, predictedMs: number | null = null): 
   predictedMs,
 })
 
-test('fewer than 5 turns: still learning', async () => {
+test('fewer than 3 turns: still learning', async () => {
   const e = estimate([turn(10_000), turn(20_000)], 50, 0, NO_PLAN)
   expect(e.kind).toBe('learning')
 })

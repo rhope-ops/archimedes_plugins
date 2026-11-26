@@ -38,13 +38,14 @@ test('the band shows the running tool, learns, then shows an ETA', async ($, on)
   {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect((await ui.find({ type: 'Text', text: /Run tests/ }))?.text?.trim()).toBe('Bash: Run tests')
-    expect((await ui.find({ type: 'Text', text: /learning/ }))?.text?.trim()).toBe('ETA learning 0/5')
+    // No history yet: no estimate and no "learning" label; the meter sweeps.
+    expect(await ui.find({ type: 'Text', text: /learning/ })).toBeUndefined()
     await ui.unmount()
   }
   {
     // Desktop: 3 rows. Row 1 the estimate, row 2 the tool, row 3 the cell meter. No step counts.
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    expect((await ui.find({ key: 'row1' }))?.text).toContain('ETA learning 0/5')
+    expect((await ui.find({ key: 'row1' }))?.text).not.toContain('learning')
     expect((await ui.find({ key: 'row2' }))?.text).toContain('Bash: Run tests')
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join(' ')).not.toContain('steps')
     await ui.unmount()
@@ -197,7 +198,7 @@ test('a reopened task, an unknown id and a failed update count for nothing', asy
   await $.tool.call(set('98', 'completed'))
   const b = await band($)
   // 0 done, 3 tasks: no estimate by tasks yet.
-  expect(b.eta).toBe('ETA learning 0/5')
+  expect(b.eta ?? '').toBe('')
   expect(b.step).toContain('task 1 of 3')
 })
 

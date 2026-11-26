@@ -6,7 +6,7 @@ export type Estimate =
   | { kind: 'over'; samples: number }
   | { kind: 'eta'; leftMs: number; basis: 'plan' | 'history'; samples: number }
 
-export const MIN_SAMPLES = 5
+export const MIN_SAMPLES = 3
 const BUCKET_MIN = 8
 
 export function bucket(promptChars: number): 's' | 'm' | 'l' {

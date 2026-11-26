@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ROLE_HEX, STATE_HEX, bar, cells, ease, fit, meter, roleOf, row1, shortPath, stateOf, sweep, verdict } from '../hooks/view'
+import { GUTTER, ROLE_HEX, STATE_HEX, bar, cells, ease, fit, fitPath, meter, roleOf, row1, shortPath, splitPath, stateOf, sweep, verdict } from '../hooks/view'
 
 // The test runner has timers; the mod's own types do not declare them.
 declare const setTimeout: (fn: (v?: unknown) => void, ms: number) => unknown
@@ -124,7 +124,7 @@ test('terminal: 3 rows, each exactly the width, in each state', async ($, on) =>
   await $.turn.start({ text: 'go', turnId: 't0' })
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
   clock.ms = 7_000
-  expect((await rows(100))[0]).toContain('ETA learning 0/5')
+  expect((await rows(100))[0]).not.toContain('learning')
   await $.turn.complete({ turnId: 't0', ...END })
 
   await learn($, clock)
@@ -135,7 +135,9 @@ test('terminal: 3 rows, each exactly the width, in each state', async ($, on) =>
   for (const cols of [40, 60, 100, 160]) {
     const r = await rows(cols)
     for (const row of r) expect(cells(row)).toBe(cols)
-    expect(r[1]).toContain('main edits src/app.ts')
+    expect(r[1]).toMatch(/■ main +edits src\/app\.ts/)
+    // From 44 columns, row 2's text starts in the same cell as row 1's goal (after the gutter).
+    if (cols >= 44) expect((r[1] ?? '').indexOf('edits')).toBe(12)
   }
 
   clock.ms += 60_000
@@ -155,9 +157,10 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
   clock.ms = 47_000
   let ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
-  expect((await ui.find({ key: 'row1' }))?.text).toContain('ETA learning 0/5')
+  expect((await ui.find({ key: 'row1' }))?.text).not.toContain('learning')
   expect((await ui.find({ type: 'Text', text: /0:47/ }))?.props?.tabular).toBe(true)
-  expect((await ui.find({ key: 'metrics' }))?.props?.flexShrink).toBe(0)
+  // Nothing at the right while the estimate learns: no empty box either.
+  expect(await ui.find({ key: 'metrics' })).toBeUndefined()
   expect((await ui.find({ key: 'row2' }))?.text).toContain('Bash: Run the test suite')
   // No advisor call yet: no advisor text.
   expect((await ui.find({ key: 'advisor' }))).toBeUndefined()
@@ -178,7 +181,22 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   ui = await $.ui.mount({ ...BAND(120, 3), surface: 'desktop' })
   const row2 = await ui.find({ key: 'row2' })
   expect(row2?.text).toContain('reviewer')
-  expect(row2?.text).toContain('reads hooks/view.ts')
+  // Verb, folder and name in their own Texts: the folder gives way first, the name stays.
+  expect((await ui.find({ key: 'verb' }))?.text).toBe('reads')
+  expect((await ui.find({ key: 'dir' }))?.text).toBe('hooks/')
+  expect((await ui.find({ key: 'name' }))?.text).toBe('view.ts')
+  expect((await ui.find({ key: 'dir' }))?.props?.flexShrink).toBe(1)
+  expect((await ui.find({ key: 'name' }))?.props?.flexShrink).toBe(0)
+  // The role label never shrinks: it sits in the fixed left column, the same width as the clock's.
+  const gutters = (await ui.findAll({ type: 'Box' })).filter(b => b.key === 'gutter')
+  expect(gutters.length).toBe(2)
+  for (const g of gutters) expect(g.props.width).toBe(GUTTER)
+  // One face and one size: no Text of rows 1 and 2 sets a size or the monospaced face
+  // (the meter's blank cells are the only Texts with a size).
+  for (const t of (await ui.findAll({ type: 'Text' })).filter(t => t.text !== ' ')) {
+    expect(t.props.size).toBeUndefined()
+    expect(t.props.mono).toBeUndefined()
+  }
   expect((await ui.find({ type: 'Text', text: /reviewer/ }))?.props?.color).toBe(ROLE_HEX.reviewer)
   expect((await ui.find({ key: 'advisor' }))?.text).toContain('advisor ×2')
   expect((await ui.find({ key: 'advisor' }))?.text).toContain('▮▮')
@@ -286,6 +304,13 @@ test('roles by agent type, and short paths', async () => {
   expect(shortPath('/repo/src/app.ts', '/repo')).toBe('src/app.ts')
   expect(shortPath('/other/a/b/c/d.ts', '/repo')).toBe('…/b/c/d.ts')
   expect(shortPath('/x/y.ts', '/')).toBe('/x/y.ts')
+  // A subagent's worktree is cut off: the repo path shows.
+  expect(shortPath('/Users/u/s-2026-11-26T17-90-161.Z/.claude/worktrees/agent-a1/src/app.ts', '/repo')).toBe('src/app.ts')
+  expect(splitPath('/repo/src/ui/app.ts', '/repo')).toEqual({ dir: 'src/ui/', name: 'app.ts' })
+  expect(splitPath('/repo/app.ts', '/repo')).toEqual({ dir: '', name: 'app.ts' })
+  // The terminal cuts a long path at its start and keeps the file name.
+  expect(fitPath('reads ', 'src/components/very/deep/app.ts', 20)).toBe('reads …/deep/app.ts')
+  expect(fitPath('reads ', 'src/app.ts', 40)).toBe('reads src/app.ts')
 })
 
 test('the estimate verdict', async () => {

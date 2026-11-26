@@ -14,12 +14,14 @@ import {
   bar,
   ease,
   fit,
+  fitPath,
   gap,
   cells as cellWidth,
   meter,
   roleOf,
   row1 as fitRow1,
-  shortPath,
+  GUTTER,
+  splitPath,
   stateOf,
   sweep,
   verdict,
@@ -36,6 +38,9 @@ const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
 const advisorSession = atom({ plugin: 'task-progress', key: 'advisorSession' } as const, 0)
 const agentTypes = atom({ plugin: 'task-progress', key: 'agentTypes' } as const, {})
+// The turn history, held for the session too: a module variable starts over on a hot reload,
+// so the band reads it from session state, never from module memory.
+const history = atom({ plugin: 'task-progress', key: 'history' } as const, [])
 
 // Turn history across sessions, in this computer's plugin store.
 const HISTORY_KEY = 'history-v1'
@@ -140,10 +145,9 @@ function targetOf(est: Estimate, elapsedMs: number): number | null {
   return null
 }
 
-// Module state the ticker shares with the hooks. `hasTicked` is true once the ticker has moved the
-// shown fill in this module's life; before that (and in tests, where no timer runs) the band draws
-// the estimate itself.
-const live: { history: TurnRecord[]; hasTicked: boolean } = { history: [], hasTicked: false }
+// `hasTicked` is true once the ticker has moved the shown fill in this module's life; before that
+// (and in tests, where no timer runs) the band draws the estimate itself.
+const live: { hasTicked: boolean } = { hasTicked: false }
 
 // Every TICK_MS while a turn runs: move the clock, then ease the shown fill toward the estimate.
 async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> {
@@ -152,10 +156,11 @@ async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> 
       const ms = await $.clock.now()
       await update($, now, () => ms)
       const list = await read($, tasks)
+      const turns = await read($, history)
       await patch($, p => {
         if (!p.isRunning) return p
         const elapsedMs = Math.max(0, ms - p.startedAt)
-        const est = estimate(live.history, p.promptChars, elapsedMs, planOf(list, p.completedInTurn))
+        const est = estimate(turns, p.promptChars, elapsedMs, planOf(list, p.completedInTurn))
         const shownFrac = ease(p.shownFrac, targetOf(est, elapsedMs))
         return shownFrac === p.shownFrac ? p : { ...p, shownFrac }
       })
@@ -207,7 +212,8 @@ export const register: Register = on => {
       description: 'Show how accurate the time-left estimate is',
     })
     try {
-      live.history = await loadHistory($)
+      const stored = await loadHistory($)
+      await update($, history, () => stored)
       // After a reload in the middle of a turn, start the clock again.
       const p = await read($, progress)
       if (p?.isRunning) {
@@ -223,8 +229,8 @@ export const register: Register = on => {
     return { text: hidden ? 'Task progress band hidden.' : 'Task progress band shown.' }
   })
 
-  on('command.run', { command: 'progress-stats' }, async () => {
-    const s = stats(live.history)
+  on('command.run', { command: 'progress-stats' }, async $ => {
+    const s = stats(await read($, history))
     const trend =
       s.recentError !== null && s.olderError !== null
         ? s.recentError < s.olderError
@@ -256,7 +262,7 @@ export const register: Register = on => {
     if (e.agentId !== undefined) return next(e)
     try {
       const t = await $.clock.now()
-      const first = estimate(live.history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
+      const first = estimate(await read($, history), e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
       const isShort = e.text.trim().length < MIN_GOAL_PROMPT
       await update($, now, () => t)
       await update($, progress, before => ({
@@ -358,8 +364,9 @@ export const register: Register = on => {
           promptChars: p.promptChars,
           predictedMs: p.predictedMs,
         }
-        live.history = [...(await loadHistory($)), record].slice(-HISTORY_MAX)
-        await $.store.set(HISTORY_KEY, live.history)
+        const turns = [...(await loadHistory($)), record].slice(-HISTORY_MAX)
+        await update($, history, () => turns)
+        await $.store.set(HISTORY_KEY, turns)
       }
     } catch {}
     return next(e)
@@ -387,7 +394,7 @@ export const register: Register = on => {
     const advisor = await read($, advisorSession)
 
     // The state, its color, and the fill.
-    const est = p.isRunning ? estimate(live.history, p.promptChars, elapsedMs, plan) : null
+    const est = p.isRunning ? estimate(await read($, history), p.promptChars, elapsedMs, plan) : null
     const v = !p.isRunning && p.outcome === 'Done' && p.predictedMs !== null ? verdict(p.predictedMs, elapsedMs) : null
     // An estimate can vanish mid-turn (the last task done with too little history): then the bar
     // keeps its fill and its running color instead of going back to the learning sweep.
@@ -416,21 +423,26 @@ export const register: Register = on => {
     const head = `${mark} ${clock(elapsedMs)}`
     const taskText = plan.total > 0 ? `task ${Math.min(plan.done + (p.isRunning ? 1 : 0), plan.total)} of ${plan.total}` : ''
     let eta = ''
-    let learning = ''
+    // No label while the estimate learns: the meter's sweep says it, and "n/5" told nobody anything.
     if (est?.kind === 'eta') eta = `~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
     else if (est?.kind === 'over') eta = 'longer than usual'
-    else if (est !== null && !isLost) learning = `ETA learning ${est.samples}/${MIN_SAMPLES}`
+    else if (est !== null) eta = ''
     else if (v !== null) eta = `est ${duration(p.predictedMs ?? 0)} ${v.text}`
     else eta = p.outcome
     const percent = p.isRunning && frac !== null && frac < 1 && est?.kind === 'eta' ? `${Math.round(frac * 100)}%` : ''
 
     // Row 2: what is worked on at the left; the advisor count at the right.
+    // A file shows as verb, folder and name: the folder gives way first, the name stays.
     const role = (p.fileRole || 'main') as Role
     let who = ''
+    let verb = ''
+    let dir = ''
+    let name = ''
     let left = ''
     if (p.isRunning && p.file !== '') {
       who = role
-      left = ` ${p.fileVerb} ${shortPath(p.file, cwd)}`
+      verb = p.fileVerb
+      ;({ dir, name } = splitPath(p.file, cwd))
     } else if (p.isRunning && p.current !== '') left = p.current
     else if (p.isRunning && subagents > 0) left = `${subagents} subagent${subagents === 1 ? '' : 's'} running`
     else if (p.isRunning) left = 'thinking'
@@ -439,57 +451,65 @@ export const register: Register = on => {
     const pips = '▮'.repeat(Math.min(8, p.advisor))
 
     if (!isTerminal) {
-      const tx = (key: string, text: string, props: Record<string, string | boolean>) => (
-        <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
+      // One face and one size for every word (only weight and color change), digits of one
+      // width, and one cut rule: a Text ends in "…" when its Box is too narrow, never mid-letter.
+      const tx = (key: string, text: string, props: Record<string, string | boolean> = {}) => (
+        <Text key={key} tabular wrap="end" maxLines={1} {...props}>
           {text}
         </Text>
       )
+      // Rows 1 and 2 share one left column, so the goal and the file start at the same place.
+      const gutter = (child: ReturnType<typeof tx> | false) => (
+        <Box key="gutter" width={GUTTER} flexShrink={0} flexDirection="row" flexWrap="nowrap">
+          {child}
+        </Box>
+      )
       const right: ReturnType<typeof tx>[] = []
-      if (learning !== '') right.push(tx('learning', learning, { color: STATE_HEX.learning, weight: 'semibold' }))
       if (eta !== '') right.push(tx('eta', eta, { color, weight: 'semibold' }))
-      if (taskText !== '') right.push(tx('task', `  ·  ${taskText}`, { dimColor: true }))
-      if (percent !== '') right.push(tx('pct', `  ${percent}`, { weight: 'bold' }))
+      if (taskText !== '') {
+        if (right.length > 0) right.push(tx('dot', '·', { dimColor: true }))
+        right.push(tx('task', taskText, { dimColor: true }))
+      }
+      if (percent !== '') right.push(tx('pct', percent, { weight: 'semibold' }))
       const cellsNow = meter(CELLS, frac, Math.floor(elapsedMs / TICK_MS))
       return (
         <Box flexDirection="column" rowGap={0}>
-          <Box key="row1" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
-            <Box flexShrink={0}>
-              <Text color={color} weight="bold" tabular wrap="clip" maxLines={1}>
-                {head}
-              </Text>
-            </Box>
+          <Box key="row1" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={1}>
+            {gutter(tx('head', head, { color, weight: 'bold' }))}
             <Box key="goal" flexGrow={1} flexShrink={1} minWidth={0}>
-              <Text weight="semibold" wrap="end" maxLines={1} {...(p.isRunning ? {} : { dimColor: true })}>
-                {goal}
-              </Text>
+              {tx('goal', goal, { weight: 'semibold', ...(p.isRunning ? {} : { dimColor: true }) })}
             </Box>
-            <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0}>
-              {right}
-            </Box>
-          </Box>
-          <Box key="row2" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
-            <Box key="now" flexGrow={1} flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap">
-              {who !== '' && (
-                <Text key="who" color={ROLE_HEX[role]} weight="semibold" wrap="clip" maxLines={1}>
-                  {`■ ${who}`}
-                </Text>
-              )}
-              <Box flexShrink={1} minWidth={0}>
-                <Text key="what" mono={who !== ''} size="footnote" dimColor={who === ''} wrap="end" maxLines={1}>
-                  {left}
-                </Text>
+            {right.length > 0 && (
+              <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0} columnGap={1}>
+                {right}
               </Box>
+            )}
+          </Box>
+          <Box key="row2" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={1}>
+            {gutter(who !== '' && tx('who', `■ ${who}`, { color: ROLE_HEX[role], weight: 'semibold' }))}
+            <Box key="now" flexGrow={1} flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap" columnGap={1}>
+              {who !== '' ? (
+                [
+                  <Box key="verb" flexShrink={0}>{tx('verb', verb, { dimColor: true })}</Box>,
+                  <Box key="path" flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap">
+                    {dir !== '' && (
+                      <Box key="dir" flexShrink={1} minWidth={0}>
+                        {tx('dir', dir, { dimColor: true })}
+                      </Box>
+                    )}
+                    <Box key="name" flexShrink={0}>{tx('name', name)}</Box>
+                  </Box>,
+                ]
+              ) : (
+                <Box key="what" flexShrink={1} minWidth={0}>
+                  {tx('what', left, { dimColor: true })}
+                </Box>
+              )}
             </Box>
             {advisorText !== '' && (
               <Box key="advisor" flexDirection="row" flexWrap="nowrap" flexShrink={0} columnGap={1}>
-                <Text tabular size="footnote" dimColor wrap="clip" maxLines={1}>
-                  {advisorText}
-                </Text>
-                {pips !== '' && (
-                  <Text size="footnote" color={ROLE_HEX.main} wrap="clip" maxLines={1}>
-                    {pips}
-                  </Text>
-                )}
+                {tx('advisor', advisorText, { dimColor: true })}
+                {pips !== '' && tx('pips', pips, { color: ROLE_HEX.main })}
               </Box>
             )}
           </Box>
@@ -515,7 +535,8 @@ export const register: Register = on => {
     // Terminal: monospace cells, so each row is laid out to exactly the width.
     if (rows < 2) {
       // One row: the bar sits inline, the estimate after it.
-      const tail = ` ${learning || eta}${percent ? ` ${percent}` : ''}`
+      const tailText = [eta, percent].filter(x => x !== '').join(' ')
+      const tail = tailText === '' ? '' : ` ${tailText}`
       const r1 = fitRow1(width, head, '', tail, tail, '')
       const filled = frac === null ? null : bar(r1.barWidth, frac)
       const moving = frac === null ? sweep(r1.barWidth, Math.floor(elapsedMs / TICK_MS)) : null
@@ -532,13 +553,17 @@ export const register: Register = on => {
       )
     }
 
+    // Rows 1 and 2 share a left column of GUTTER cells when the row has room, so the goal and
+    // the file start in the same cell.
+    const col = width >= GUTTER * 4 ? GUTTER + 1 : 0
+    const pad = (text: string) => (col > 0 ? `${text}${' '.repeat(Math.max(1, col - cellWidth(text)))}` : `${text} `)
+
     // Row 1: head, goal (cut first), then the estimate, the task and the percent at the right.
-    const learningT = learning
     const etaT = eta
-    const taskT = taskText !== '' ? ` · ${taskText}` : ''
+    const taskT = taskText !== '' ? `${etaT !== '' ? ' · ' : ''}${taskText}` : ''
     const pctT = percent !== '' ? ` ${percent}` : ''
-    const rightCells = cellWidth(learningT) + cellWidth(etaT) + cellWidth(taskT) + cellWidth(pctT)
-    const headT = `${head} `
+    const rightCells = cellWidth(etaT) + cellWidth(taskT) + cellWidth(pctT)
+    const headT = pad(head)
     const fitRight = rightCells + cellWidth(headT) <= width
     const goalT = fitRight ? fit(goal, Math.max(0, width - cellWidth(headT) - rightCells - 1)) : ''
     const space1 = fitRight ? gap(cellWidth(headT) + cellWidth(goalT), rightCells, width) : ''
@@ -549,7 +574,6 @@ export const register: Register = on => {
         </Text>
         {goalT !== '' && <Text weight="bold">{goalT}</Text>}
         {space1 !== '' && <Text>{space1}</Text>}
-        {fitRight && learningT !== '' && <Text color={STATE_NAMED.learning}>{learningT}</Text>}
         {fitRight && etaT !== '' && <Text color={color}>{etaT}</Text>}
         {fitRight && taskT !== '' && <Text dimColor>{taskT}</Text>}
         {fitRight && pctT !== '' && <Text weight="bold">{pctT}</Text>}
@@ -570,11 +594,14 @@ export const register: Register = on => {
 
     // Row 2: what is worked on at the left (the role in its color), the advisor at the right.
     // What gives way on a narrow row: the pips, then the advisor count, then the role.
+    // A path is cut at its start, so the file name stays.
     let rightT = advisorText !== '' ? `${advisorText}${pips !== '' ? ` ${pips}` : ''}` : ''
     if (cellWidth(rightT) + 12 > width) rightT = advisorText
     if (cellWidth(rightT) + 12 > width) rightT = ''
-    const whoT = who !== '' && cellWidth(`■ ${who}`) + cellWidth(rightT) + 2 <= width ? `■ ${who}` : ''
-    const leftT = fit(left, Math.max(0, width - cellWidth(whoT) - cellWidth(rightT) - 1))
+    const whoRaw = who !== '' && cellWidth(`■ ${who}`) + cellWidth(rightT) + 2 <= width ? `■ ${who}` : ''
+    const whoT = whoRaw !== '' ? pad(whoRaw) : col > 0 ? ' '.repeat(col) : ''
+    const room = Math.max(0, width - cellWidth(whoT) - cellWidth(rightT) - 1)
+    const leftT = who !== '' ? fitPath(`${verb} `, `${dir}${name}`, room) : fit(left, room)
     const space2 = gap(cellWidth(whoT) + cellWidth(leftT), cellWidth(rightT), width)
     return (
       <Box flexDirection="column">
