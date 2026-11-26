@@ -448,7 +448,8 @@ export const register: Register = on => {
     else if (p.isRunning) left = 'thinking'
     else left = p.changed.length === 0 ? 'no files changed' : `${p.changed.length} file${p.changed.length === 1 ? '' : 's'} changed`
     const advisorText = advisor > 0 ? `advisor ×${advisor}` : ''
-    const pips = '▮'.repeat(Math.min(8, p.advisor))
+    // One square per advisor call in this turn: the same mark as the role square at the left.
+    const pips = '■'.repeat(Math.min(8, p.advisor))
 
     if (!isTerminal) {
       // One face and one size for every word (only weight and color change), digits of one
@@ -471,6 +472,16 @@ export const register: Register = on => {
         right.push(tx('task', taskText, { dimColor: true }))
       }
       if (percent !== '') right.push(tx('pct', percent, { weight: 'semibold' }))
+      // Rows 1 and 2 share one right column too: the width of the wider of the two, each row's
+      // text flush right in it, so "task 1 of 3" and "advisor ×1" end and start in line.
+      const right1 = [eta, eta !== '' && taskText !== '' ? '·' : '', taskText, percent].filter(x => x !== '').join(' ')
+      const right2 = [advisorText, pips].filter(x => x !== '').join(' ')
+      const rightW = Math.max(cellWidth(right1), cellWidth(right2))
+      const rightCol = (key: string, children: ReturnType<typeof tx>[] | ReturnType<typeof tx> | false) => (
+        <Box key={key} width={rightW} flexShrink={0} flexDirection="row" flexWrap="nowrap" justifyContent="flex-end" alignItems="center" columnGap={1}>
+          {children}
+        </Box>
+      )
       const cellsNow = meter(CELLS, frac, Math.floor(elapsedMs / TICK_MS))
       return (
         <Box flexDirection="column" rowGap={0}>
@@ -479,11 +490,7 @@ export const register: Register = on => {
             <Box key="goal" flexGrow={1} flexShrink={1} minWidth={0}>
               {tx('goal', goal, { weight: 'semibold', ...(p.isRunning ? {} : { dimColor: true }) })}
             </Box>
-            {right.length > 0 && (
-              <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0} columnGap={1}>
-                {right}
-              </Box>
-            )}
+            {rightW > 0 && rightCol('metrics', right)}
           </Box>
           <Box key="row2" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={1}>
             {gutter(who !== '' && tx('who', `■ ${who}`, { color: ROLE_HEX[role], weight: 'semibold' }))}
@@ -493,11 +500,11 @@ export const register: Register = on => {
                   <Box key="verb" flexShrink={0}>{tx('verb', verb, { dimColor: true })}</Box>,
                   <Box key="path" flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap">
                     {dir !== '' && (
-                      <Box key="dir" flexShrink={1} minWidth={0}>
+                      <Box key="dir" flexShrink={100} minWidth={0}>
                         {tx('dir', dir, { dimColor: true })}
                       </Box>
                     )}
-                    <Box key="name" flexShrink={0}>{tx('name', name)}</Box>
+                    <Box key="name" flexShrink={1} minWidth={0}>{tx('name', name)}</Box>
                   </Box>,
                 ]
               ) : (
@@ -506,12 +513,21 @@ export const register: Register = on => {
                 </Box>
               )}
             </Box>
-            {advisorText !== '' && (
-              <Box key="advisor" flexDirection="row" flexWrap="nowrap" flexShrink={0} columnGap={1}>
-                {tx('advisor', advisorText, { dimColor: true })}
-                {pips !== '' && tx('pips', pips, { color: ROLE_HEX.main })}
-              </Box>
-            )}
+            {rightW > 0 &&
+              rightCol(
+                'advisor',
+                // One Text, so the squares sit on the count's own line.
+                advisorText !== '' && (
+                  <Text key="advisor" tabular wrap="end" maxLines={1} dimColor>
+                    {advisorText}
+                    {pips !== '' && (
+                      <Text key="pips" color={ROLE_HEX.main} dimColor={false}>
+                        {` ${pips}`}
+                      </Text>
+                    )}
+                  </Text>
+                ),
+              )}
           </Box>
           <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden" columnGap="xs">
             {cellsNow.map((c, i) => (
