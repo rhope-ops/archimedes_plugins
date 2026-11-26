@@ -154,16 +154,6 @@ export function splitCells(width: number, shares: readonly number[]): number[] {
   return cells
 }
 
-// One color per agent type, in the order the types first appear. The 8 hues of the dataviz
-// reference palette (dark-surface steps); named colors in the terminal. After 8 they repeat.
-const HEX = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767']
-const NAMED = ['blue', 'yellow', 'cyan', 'magenta', 'green', 'blueBright', 'magentaBright', 'red']
-
-export function typeColor(slot: number, isTerminal: boolean): string {
-  const list = isTerminal ? NAMED : HEX
-  return list[(Math.max(0, slot) % list.length + list.length) % list.length] ?? 'gray'
-}
-
 // The /cost record the token-log Stop hook pushes next to its rows (kit scripts/token_log.py reads it).
 // Claude Code's own estimate, as /cost shows it. No task text: only ids, types, models and numbers.
 export type CostRecord = {

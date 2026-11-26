@@ -1,1 +1,1 @@
-{ "name": "task-progress", "version": "0.7.0", "description": "Band above the prompt: the goal of the current task, what runs now, elapsed time, steps, tool calls and running subagents", "types": "./types/index.d.ts" }
+{ "name": "task-progress", "version": "0.8.0", "description": "Band above the prompt, 3 rows: the goal with the clock and time left; the file in use (colored by agent role) and the advisor count; a cell meter colored by state", "types": "./types/index.d.ts" }

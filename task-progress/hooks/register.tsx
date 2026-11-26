@@ -3,22 +3,51 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Plan, Progress, TaskList, TurnRecord } from '../types'
 import { MIN_SAMPLES, duration, estimate, stats } from './eta'
+import type { Estimate } from './eta'
 import { activeTitle, apply, applyChange, completedChange } from './tasks'
-import { SPIN, bar, fit, row1 as fitRow1, row2 as fitRow2, sweep, verdict } from './view'
+import {
+  ROLE_HEX,
+  ROLE_NAMED,
+  SPIN,
+  STATE_HEX,
+  STATE_NAMED,
+  bar,
+  ease,
+  fit,
+  gap,
+  cells as cellWidth,
+  meter,
+  roleOf,
+  row1 as fitRow1,
+  shortPath,
+  stateOf,
+  sweep,
+  verdict,
+} from './view'
+import type { BandState, Role } from './view'
 import type { Change } from './tasks'
 
 // Change a tag when its value's fields change: it declines what an older version stored.
 const progress = atom({ plugin: 'task-progress', key: 'progress' } as const, null, {
-  shape: 'progress-5',
+  shape: 'progress-6',
 })
 const tasks = atom({ plugin: 'task-progress', key: 'tasks' } as const, [], { shape: 'tasks-3' })
 const now = atom({ plugin: 'task-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'task-progress', key: 'isHidden' } as const, false)
+const advisorSession = atom({ plugin: 'task-progress', key: 'advisorSession' } as const, 0)
+const agentTypes = atom({ plugin: 'task-progress', key: 'agentTypes' } as const, {})
 
 // Turn history across sessions, in this computer's plugin store.
 const HISTORY_KEY = 'history-v1'
 const HISTORY_MAX = 300
-const TERMINAL_COLOR: Record<string, string> = { success: 'green', warning: 'yellow', error: 'red' }
+// The band redraws this often while a turn runs, so the bar moves smoothly.
+const TICK_MS = 150
+// Cells of the desktop meter.
+const CELLS = 40
+const TRACK_HEX = '#8a94a633'
+
+const READS = new Set(['Read', 'NotebookRead'])
+const WRITES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 
 // Short label for the tool that runs now.
 function describe(tool: string, input: Record<string, unknown>): string {
@@ -104,11 +133,34 @@ function planOf(list: TaskList, completedInTurn: readonly string[]): Plan {
   }
 }
 
-// Moves the elapsed time once a second while a turn runs.
+// Where the bar should be now: elapsed ÷ (elapsed + time left); 1 when over; null while learning.
+function targetOf(est: Estimate, elapsedMs: number): number | null {
+  if (est.kind === 'eta') return elapsedMs / Math.max(1, elapsedMs + est.leftMs)
+  if (est.kind === 'over') return 1
+  return null
+}
+
+// Module state the ticker shares with the hooks. `hasTicked` is true once the ticker has moved the
+// shown fill in this module's life; before that (and in tests, where no timer runs) the band draws
+// the estimate itself.
+const live: { history: TurnRecord[]; hasTicked: boolean } = { history: [], hasTicked: false }
+
+// Every TICK_MS while a turn runs: move the clock, then ease the shown fill toward the estimate.
 async function startTicker($: EngineInterface): Promise<{ cancel: () => void }> {
-  return $.clock.every(1000, async () => {
-    const ms = await $.clock.now()
-    await update($, now, () => ms)
+  return $.clock.every(TICK_MS, async () => {
+    try {
+      const ms = await $.clock.now()
+      await update($, now, () => ms)
+      const list = await read($, tasks)
+      await patch($, p => {
+        if (!p.isRunning) return p
+        const elapsedMs = Math.max(0, ms - p.startedAt)
+        const est = estimate(live.history, p.promptChars, elapsedMs, planOf(list, p.completedInTurn))
+        const shownFrac = ease(p.shownFrac, targetOf(est, elapsedMs))
+        return shownFrac === p.shownFrac ? p : { ...p, shownFrac }
+      })
+      live.hasTicked = true
+    } catch {}
   })
 }
 
@@ -145,16 +197,17 @@ async function askGoal($: EngineInterface, turnId: string, text: string): Promis
 
 export const register: Register = on => {
   let ticker: { cancel: () => void } | undefined
-  let history: TurnRecord[] = []
+  let cwd = ''
 
   on('session.start', async ($, e, next) => {
+    cwd = e.cwd
     await $.command.register({ name: 'progress', description: 'Show or hide the task progress band' })
     await $.command.register({
       name: 'progress-stats',
       description: 'Show how accurate the time-left estimate is',
     })
     try {
-      history = await loadHistory($)
+      live.history = await loadHistory($)
       // After a reload in the middle of a turn, start the clock again.
       const p = await read($, progress)
       if (p?.isRunning) {
@@ -171,7 +224,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'progress-stats' }, async () => {
-    const s = stats(history)
+    const s = stats(live.history)
     const trend =
       s.recentError !== null && s.olderError !== null
         ? s.recentError < s.olderError
@@ -187,11 +240,23 @@ export const register: Register = on => {
     }
   })
 
+  // Learn each subagent's type, so the band colors its file by role.
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const id = result.agentId
+      if (typeof id === 'string' && id !== '') {
+        await update($, agentTypes, m => (m[id] === e.subagentType ? m : { ...m, [id]: e.subagentType }))
+      }
+    } catch {}
+    return result
+  })
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     try {
       const t = await $.clock.now()
-      const first = estimate(history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
+      const first = estimate(live.history, e.text.length, 0, { total: 0, done: 0, doneThisTurn: 0 })
       const isShort = e.text.trim().length < MIN_GOAL_PROMPT
       await update($, now, () => t)
       await update($, progress, before => ({
@@ -209,6 +274,12 @@ export const register: Register = on => {
         promptChars: e.text.length,
         predictedMs: first.kind === 'eta' ? first.leftMs : null,
         completedInTurn: [],
+        shownFrac: 0,
+        file: '',
+        fileVerb: '',
+        fileRole: '',
+        changed: [],
+        advisor: 0,
       }))
       ticker?.cancel()
       ticker = await startTicker($)
@@ -222,20 +293,42 @@ export const register: Register = on => {
       // Between tools nothing runs: the band shows the goal alone, not the word "Thinking".
       await patch($, p => ({ ...p, steps: p.steps + 1, current: '' }))
     }
-    return yield* next(e)
+    const response = yield* next(e)
+    // The advisor is a server tool: it shows in the step's result, never as a tool call.
+    try {
+      const calls = (response.serverToolUses ?? []).filter(u => u.name === 'advisor').length
+      if (calls > 0) {
+        await update($, advisorSession, n => n + calls)
+        await patch($, p => ({ ...p, advisor: p.advisor + calls }))
+      }
+    } catch {}
+    return response
   })
 
   on('tool.call', async ($, e, next) => {
     // Observe only: a failure here must never stop the tool.
     const args = e as unknown as Record<string, unknown>
+    const raw = args.file_path ?? args.notebook_path
+    const path = typeof raw === 'string' ? raw : ''
+    const isFile = path !== '' && (READS.has(e.tool) || WRITES.has(e.tool))
     try {
-      if (e.agentId === undefined) {
-        const label = describe(e.tool, args)
-        await patch($, p => ({ ...p, tools: p.tools + 1, current: label }))
-      }
+      const role: Role = e.agentId === undefined ? 'main' : roleOf((await read($, agentTypes))[e.agentId] ?? 'worker')
+      await patch($, p => ({
+        ...p,
+        ...(e.agentId === undefined ? { tools: p.tools + 1, current: describe(e.tool, args) } : {}),
+        // The newest file tool of any agent names the file; another tool of that agent clears it.
+        ...(isFile
+          ? { file: path, fileVerb: READS.has(e.tool) ? 'reads' : 'edits', fileRole: role }
+          : p.fileRole === role
+            ? { file: '', fileVerb: '', fileRole: '' }
+            : {}),
+      }))
     } catch {}
     const ran = await next(e)
     try {
+      if (isFile && WRITES.has(e.tool) && !failed(ran)) {
+        await patch($, p => (p.changed.includes(path) ? p : { ...p, changed: [...p.changed, path].slice(-200) }))
+      }
       // Subagents write the session's task list too.
       if (e.tool === 'TaskCreate' || e.tool === 'TaskUpdate' || e.tool === 'TodoWrite') {
         await track($, e.tool, args, ran)
@@ -252,7 +345,7 @@ export const register: Register = on => {
     try {
       const t = await $.clock.now()
       const outcome = { answer: 'Done', aborted: 'Stopped', refusal: 'Refused', error: 'Error' }[e.reason]
-      await patch($, p => ({ ...p, isRunning: false, endedAt: t, current: '', outcome }))
+      await patch($, p => ({ ...p, isRunning: false, endedAt: t, current: '', file: '', fileVerb: '', fileRole: '', outcome }))
       // Learn only from turns that ran to an answer.
       const p = await read($, progress)
       if (p !== null && e.reason === 'answer') {
@@ -264,8 +357,8 @@ export const register: Register = on => {
           promptChars: p.promptChars,
           predictedMs: p.predictedMs,
         }
-        history = [...(await loadHistory($)), record].slice(-HISTORY_MAX)
-        await $.store.set(HISTORY_KEY, history)
+        live.history = [...(await loadHistory($)), record].slice(-HISTORY_MAX)
+        await $.store.set(HISTORY_KEY, live.history)
       }
     } catch {}
     return next(e)
@@ -276,8 +369,9 @@ export const register: Register = on => {
     if (p === null || e.props.hasSurvey || (await read($, isHidden))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
+    const isTerminal = e.surface === 'terminal'
     const width = Math.max(0, e.props.bodyColumns)
-    const isTwoRows = e.props.maxRows >= 2
+    const rows = e.props.maxRows
     const t = p.isRunning ? await read($, now) : p.endedAt
     const elapsedMs = Math.max(0, t - p.startedAt)
     const taskList = await read($, tasks)
@@ -285,198 +379,202 @@ export const register: Register = on => {
     // What the turn is for: the task in progress, else the model's summary of the prompt.
     // A task left in progress by an earlier turn does not hide this turn's goal.
     const goal = (p.hasTaskChange ? activeTitle(taskList) : '') || p.goal
-    const doing = p.isRunning ? p.current : ''
     // Read live, so background subagents from an earlier turn count too.
     const subagents = p.isRunning
       ? (await $.agent.list()).filter(a => a.kind === 'local_agent' && a.status === 'running').length
       : 0
-    const counts = [
-      `${p.steps} steps`,
-      `${p.tools} tools`,
-      ...(plan.total > 0 ? [`task ${Math.min(plan.done + (p.isRunning ? 1 : 0), plan.total)} of ${plan.total}`] : []),
-      ...(subagents > 0 ? [`${subagents} subagents`] : []),
-    ].join(' · ')
+    const advisor = await read($, advisorSession)
 
-    // Row 1: state and clock, a bar across the width, then the estimate.
-    let head: string
-    let headColor: string
-    let tail: string
-    let shortTail: string
-    let tailColor: string
-    let frac: number | null
-    if (!p.isRunning) {
-      const isDone = p.outcome === 'Done'
-      head = `● ${p.outcome} ${clock(elapsedMs)}`
-      headColor = isDone ? 'green' : 'yellow'
-      // The same verdict as the desktop: ✓, "N× slower" or "N× faster", in the terminal's named colors.
-      const v = p.predictedMs !== null && isDone ? verdict(p.predictedMs, elapsedMs) : null
-      tail = v ? ` est ${duration(p.predictedMs ?? 0)} ${v.text}` : ''
-      shortTail = v ? ` ${v.text}` : ''
-      tailColor = v ? TERMINAL_COLOR[v.color] ?? 'gray' : 'gray'
-      frac = 1
-    } else {
-      const est = estimate(history, p.promptChars, elapsedMs, plan)
-      head = `${SPIN[Math.floor(elapsedMs / 1000) % SPIN.length]} ${clock(elapsedMs)}`
-      headColor = 'cyan'
-      if (est.kind === 'eta') {
-        frac = elapsedMs / Math.max(1, elapsedMs + est.leftMs)
-        tail = ` ~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
-        shortTail = ` ~${duration(est.leftMs)}`
-        tailColor = 'cyan'
-      } else if (est.kind === 'over') {
-        frac = 1
-        tail = ' longer than usual'
-        shortTail = ' longer'
-        tailColor = 'yellow'
-      } else {
-        frac = null
-        tail = ` ETA learning ${est.samples}/${MIN_SAMPLES}`
-        shortTail = ` ${est.samples}/${MIN_SAMPLES}`
-        tailColor = 'gray'
-      }
-    }
-    const pct = p.isRunning && frac !== null && frac < 1 ? ` ${Math.round(frac * 100)}%` : ''
-    // One line for the terminal: the goal, then what runs now.
-    const current = ` ${[goal, doing].filter(x => x !== '').join(' · ')}`.trimEnd()
-    const barColor = !p.isRunning ? headColor : tailColor === 'yellow' ? 'yellow' : 'cyan'
+    // The state, its color, and the fill.
+    const est = p.isRunning ? estimate(live.history, p.promptChars, elapsedMs, plan) : null
+    const v = !p.isRunning && p.outcome === 'Done' && p.predictedMs !== null ? verdict(p.predictedMs, elapsedMs) : null
+    const state: BandState = stateOf(p.isRunning, est?.kind === 'eta' ? 'eta' : est?.kind === 'over' ? 'over' : 'learning', p.outcome, v?.color ?? null)
+    const target = est === null ? null : targetOf(est, elapsedMs)
+    // Running: the eased fill (the estimate itself before the first tick); null while learning.
+    // Done: full. Stopped or failed: where it stood.
+    const frac: number | null = p.isRunning
+      ? target === null
+        ? null
+        : live.hasTicked
+          ? p.shownFrac
+          : target
+      : p.outcome === 'Done'
+        ? 1
+        : p.shownFrac
+    const color = isTerminal ? STATE_NAMED[state] : STATE_HEX[state]
 
-    // Desktop, VS Code and phones (proportional fonts): the app lays the rows out.
-    // Row 1: state and clock at the left, what runs now in the middle (cut first), the metrics fixed at the right.
-    // Row 2, right under it: a shaded block bar (█ fill, ▓▒ edge, ░ track; while learning a moving ░▒▓█▓▒░ glow).
-    // Runs of one glyph sit in boxes sized as a share of the row and are cut at their edge: solid runs show no seam.
-    if (e.surface !== 'terminal') {
-      const fillColor = !p.isRunning ? (p.outcome === 'Done' ? 'success' : 'warning') : tailColor === 'yellow' ? 'warning' : 'suggestion'
-      const RUN = 400
-      const run = (key: string, glyph: string, color: string | null, box: Record<string, string | number>) => (
-        <Box key={key} overflow="hidden" flexShrink={0} {...box}>
-          {color === null ? (
-            <Text mono size="caption" dimColor wrap="clip" maxLines={1}>
-              {glyph.repeat(RUN)}
-            </Text>
-          ) : (
-            <Text mono size="caption" color={color} wrap="clip" maxLines={1}>
-              {glyph.repeat(RUN)}
-            </Text>
-          )}
-        </Box>
-      )
-      const piece = (key: string, text: string, color: string) => (
-        <Box key={key} flexShrink={0}>
-          <Text mono size="caption" color={color} wrap="clip" maxLines={1}>
-            {text}
-          </Text>
-        </Box>
-      )
-      const share = (x: number) => `${Math.round(Math.min(1, Math.max(0, x)) * 100)}%`
-      const track = (key: string) => (
-        <Box key={key} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-          <Text mono size="caption" dimColor wrap="clip" maxLines={1}>
-            {'░'.repeat(RUN)}
-          </Text>
-        </Box>
-      )
-      // The glow starts at 0-75% of the row, so its 5 glyphs fit whole on rows of 20+ columns.
-      const at = (Math.floor(elapsedMs / 1000) * 7) % 76
-      const bars =
-        frac === null
-          ? [run('before', '░', null, { width: `${at}%` }), piece('glow', '▒▓█▓▒', fillColor), track('after')]
-          : frac >= 1
-            ? [run('fill', '█', fillColor, { flexGrow: 1, flexShrink: 1, minWidth: 0 })]
-            : // The fill may shrink a little, so the ▓▒ edge always fits whole near 100%.
-              [run('fill', '█', fillColor, { width: share(frac), flexShrink: 1, minWidth: 0 }), piece('edge', '▓▒', fillColor), track('rest')]
-      const t = (key: string, text: string, props: Record<string, string | boolean>) => (
+    // Row 1: the spinner (or the end mark) and the clock; the goal; the estimate at the right.
+    const mark = p.isRunning ? (SPIN[Math.floor(elapsedMs / 250) % SPIN.length] ?? '◐') : state === 'ok' ? '✓' : state === 'over' ? '●' : '✕'
+    const head = `${mark} ${clock(elapsedMs)}`
+    const taskText = plan.total > 0 ? `task ${Math.min(plan.done + (p.isRunning ? 1 : 0), plan.total)} of ${plan.total}` : ''
+    let eta = ''
+    let learning = ''
+    if (est?.kind === 'eta') eta = `~${duration(est.leftMs)} left${est.basis === 'plan' ? ' (by tasks)' : ''}`
+    else if (est?.kind === 'over') eta = 'longer than usual'
+    else if (est !== null) learning = `ETA learning ${est.samples}/${MIN_SAMPLES}`
+    else if (v !== null) eta = `est ${duration(p.predictedMs ?? 0)} ${v.text}`
+    else eta = p.outcome
+    const percent = p.isRunning && frac !== null && frac < 1 && est?.kind === 'eta' ? `${Math.round(frac * 100)}%` : ''
+
+    // Row 2: what is worked on at the left; the advisor count at the right.
+    const role = (p.fileRole || 'main') as Role
+    let who = ''
+    let left = ''
+    if (p.isRunning && p.file !== '') {
+      who = role
+      left = ` ${p.fileVerb} ${shortPath(p.file, cwd)}`
+    } else if (p.isRunning && p.current !== '') left = p.current
+    else if (p.isRunning && subagents > 0) left = `${subagents} subagent${subagents === 1 ? '' : 's'} running`
+    else if (p.isRunning) left = 'thinking'
+    else left = p.changed.length === 0 ? 'no files changed' : `${p.changed.length} file${p.changed.length === 1 ? '' : 's'} changed`
+    const advisorText = advisor > 0 ? `advisor ×${advisor}` : ''
+    const pips = '▮'.repeat(Math.min(8, p.advisor))
+
+    if (!isTerminal) {
+      const tx = (key: string, text: string, props: Record<string, string | boolean>) => (
         <Text key={key} tabular wrap="clip" maxLines={1} {...props}>
           {text}
         </Text>
       )
-      // The metrics: counts in gray; then time left (blue) and percent (bold), or the estimate's verdict.
-      const right: ReturnType<typeof t>[] = [t('counts', counts, { dimColor: true })]
-      if (p.isRunning) {
-        right.push(t('sep', '  ·  ', { dimColor: true }))
-        right.push(t('eta', tail.trim(), { color: tailColor === 'gray' ? 'inactive' : tailColor === 'yellow' ? 'warning' : 'suggestion' }))
-        if (pct) right.push(t('pct', `  ${pct.trim()}`, { weight: 'bold' }))
-      } else if (p.predictedMs !== null && p.outcome === 'Done') {
-        const v = verdict(p.predictedMs, elapsedMs)
-        right.push(t('sep', '  ·  ', { dimColor: true }))
-        right.push(t('est', `est ${duration(p.predictedMs)} `, { dimColor: true }))
-        right.push(t('verdict', v.text, { color: v.color, weight: 'bold' }))
-      }
+      const right: ReturnType<typeof tx>[] = []
+      if (learning !== '') right.push(tx('learning', learning, { color: STATE_HEX.learning, weight: 'semibold' }))
+      if (eta !== '') right.push(tx('eta', eta, { color, weight: 'semibold' }))
+      if (taskText !== '') right.push(tx('task', `  ·  ${taskText}`, { dimColor: true }))
+      if (percent !== '') right.push(tx('pct', `  ${percent}`, { weight: 'bold' }))
+      const cellsNow = meter(CELLS, frac, Math.floor(elapsedMs / TICK_MS))
       return (
-        <Box flexDirection="column">
-          <Box flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
+        <Box flexDirection="column" rowGap={0}>
+          <Box key="row1" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
             <Box flexShrink={0}>
-              <Text color={headColor} weight="bold" tabular wrap="clip" maxLines={1}>
+              <Text color={color} weight="bold" tabular wrap="clip" maxLines={1}>
                 {head}
               </Text>
             </Box>
-            <Box flexGrow={1} flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap" columnGap={1}>
-              {goal !== '' && (
-                <Box key="goal" flexShrink={1} minWidth={0}>
-                  <Text weight="semibold" wrap="end" maxLines={1} {...(p.isRunning ? {} : { dimColor: true })}>
-                    {goal}
-                  </Text>
-                </Box>
-              )}
-              {doing !== '' && (
-                <Box key="doing" flexShrink={4} minWidth={0}>
-                  <Text dimColor wrap="end" maxLines={1}>
-                    {goal !== '' ? `· ${doing}` : doing}
-                  </Text>
-                </Box>
-              )}
+            <Box key="goal" flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text weight="semibold" wrap="end" maxLines={1} {...(p.isRunning ? {} : { dimColor: true })}>
+                {goal}
+              </Text>
             </Box>
             <Box key="metrics" flexDirection="row" flexWrap="nowrap" flexShrink={0}>
               {right}
             </Box>
           </Box>
-          <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden">
-            {bars}
+          <Box key="row2" flexDirection="row" flexWrap="nowrap" alignItems="center" columnGap={2}>
+            <Box key="now" flexGrow={1} flexShrink={1} minWidth={0} flexDirection="row" flexWrap="nowrap">
+              {who !== '' && (
+                <Text key="who" color={ROLE_HEX[role]} weight="semibold" wrap="clip" maxLines={1}>
+                  {`■ ${who}`}
+                </Text>
+              )}
+              <Box flexShrink={1} minWidth={0}>
+                <Text key="what" mono={who !== ''} size="footnote" dimColor={who === ''} wrap="end" maxLines={1}>
+                  {left}
+                </Text>
+              </Box>
+            </Box>
+            {advisorText !== '' && (
+              <Box key="advisor" flexDirection="row" flexWrap="nowrap" flexShrink={0} columnGap={1}>
+                <Text tabular size="footnote" dimColor wrap="clip" maxLines={1}>
+                  {advisorText}
+                </Text>
+                {pips !== '' && (
+                  <Text size="footnote" color={ROLE_HEX.main} wrap="clip" maxLines={1}>
+                    {pips}
+                  </Text>
+                )}
+              </Box>
+            )}
+          </Box>
+          <Box key="bar" flexDirection="row" flexWrap="nowrap" overflow="hidden" columnGap="xs">
+            {cellsNow.map((c, i) => (
+              <Box
+                key={`c${i}`}
+                width={0}
+                flexGrow={1}
+                flexShrink={1}
+                minWidth={0}
+                height={1}
+                backgroundColor={c === 'on' ? STATE_HEX[state] : c === 'edge' ? `${STATE_HEX[state]}88` : TRACK_HEX}
+              >
+                <Text size="caption"> </Text>
+              </Box>
+            ))}
           </Box>
         </Box>
       )
     }
 
-    // Terminal: monospace cells, so the row is laid out to exactly the width.
-    // One row only: the tool name goes after the estimate and the bar gets shorter.
-    const r1 = fitRow1(width, head, pct, tail, shortTail, isTwoRows ? '' : current)
-    const filled = frac === null ? null : bar(r1.barWidth, frac)
-    const moving = frac === null ? sweep(r1.barWidth, Math.floor(elapsedMs / 1000)) : null
+    // Terminal: monospace cells, so each row is laid out to exactly the width.
+    if (rows < 2) {
+      // One row: the bar sits inline, the estimate after it.
+      const tail = ` ${learning || eta}${percent ? ` ${percent}` : ''}`
+      const r1 = fitRow1(width, head, '', tail, tail, '')
+      const filled = frac === null ? null : bar(r1.barWidth, frac)
+      const moving = frac === null ? sweep(r1.barWidth, Math.floor(elapsedMs / TICK_MS)) : null
+      return (
+        <Box>
+          <Text color={color} weight="bold" wrap="clip">
+            {r1.head}
+          </Text>
+          {filled !== null ? <Text color={color}>{filled.fill}</Text> : <Text dimColor>{moving?.before ?? ''}</Text>}
+          {filled !== null ? <Text dimColor>{filled.empty}</Text> : <Text color={color}>{(moving?.glow ?? '').replace(/[▒▓]/g, '█')}</Text>}
+          {moving !== null && <Text dimColor>{moving.after}</Text>}
+          {r1.tail !== '' && <Text color={color}>{r1.tail}</Text>}
+        </Box>
+      )
+    }
 
+    // Row 1: head, goal (cut first), then the estimate, the task and the percent at the right.
+    const learningT = learning
+    const etaT = eta
+    const taskT = taskText !== '' ? ` · ${taskText}` : ''
+    const pctT = percent !== '' ? ` ${percent}` : ''
+    const rightCells = cellWidth(learningT) + cellWidth(etaT) + cellWidth(taskT) + cellWidth(pctT)
+    const headT = `${head} `
+    const fitRight = rightCells + cellWidth(headT) <= width
+    const goalT = fitRight ? fit(goal, Math.max(0, width - cellWidth(headT) - rightCells - 1)) : ''
+    const space1 = fitRight ? gap(cellWidth(headT) + cellWidth(goalT), rightCells, width) : ''
     const row1 = (
-      <Box>
-        <Text color={headColor} weight="bold" wrap="clip">
-          {r1.head}
+      <Box key="row1">
+        <Text color={color} weight="bold" wrap="clip">
+          {fitRight ? headT : fit(headT, width)}
         </Text>
-        {filled !== null ? (
-          <Text color={barColor}>{filled.fill}</Text>
-        ) : (
-          <Text dimColor>{moving?.before ?? ''}</Text>
-        )}
-        {filled !== null ? (
-          <Text dimColor>{filled.empty}</Text>
-        ) : (
-          <Text color="cyan">{moving?.glow ?? ''}</Text>
-        )}
-        {moving !== null && <Text dimColor>{moving.after}</Text>}
-        {r1.pct !== '' && <Text weight="bold">{r1.pct}</Text>}
-        {r1.tail !== '' && <Text color={tailColor}>{r1.tail}</Text>}
-        {r1.inline !== '' && <Text>{r1.inline}</Text>}
+        {goalT !== '' && <Text weight="bold">{goalT}</Text>}
+        {space1 !== '' && <Text>{space1}</Text>}
+        {fitRight && learningT !== '' && <Text color={STATE_NAMED.learning}>{learningT}</Text>}
+        {fitRight && etaT !== '' && <Text color={color}>{etaT}</Text>}
+        {fitRight && taskT !== '' && <Text dimColor>{taskT}</Text>}
+        {fitRight && pctT !== '' && <Text weight="bold">{pctT}</Text>}
       </Box>
     )
-    if (!isTwoRows) return row1
 
-    // Row 2: what Claude does now on the left, the counts on the right.
-    const r2 = fitRow2(width, current, counts)
+    // The bar: the full width, the state's color; while learning a block sweeps along a dim track.
+    const filled = frac === null ? null : bar(width, frac)
+    const moving = frac === null ? sweep(width, Math.floor(elapsedMs / TICK_MS)) : null
+    const barRow = (
+      <Box key="bar">
+        {filled !== null ? <Text color={color}>{filled.fill}</Text> : <Text dimColor>{moving?.before ?? ''}</Text>}
+        {filled !== null ? <Text dimColor>{filled.empty}</Text> : <Text color={color}>{(moving?.glow ?? '').replace(/[▒▓]/g, '█')}</Text>}
+        {moving !== null && <Text dimColor>{moving.after}</Text>}
+      </Box>
+    )
+    if (rows < 3) return <Box flexDirection="column">{row1}{barRow}</Box>
+
+    // Row 2: what is worked on at the left (the role in its color), the advisor at the right.
+    const rightT = advisorText !== '' ? `${advisorText}${pips !== '' ? ` ${pips}` : ''}` : ''
+    const whoT = who !== '' ? `■ ${who}` : ''
+    const leftT = fit(left, Math.max(0, width - cellWidth(whoT) - cellWidth(rightT) - 1))
+    const space2 = gap(cellWidth(whoT) + cellWidth(leftT), cellWidth(rightT), width)
     return (
       <Box flexDirection="column">
         {row1}
-        <Box>
-          <Text>{r2.left}</Text>
-          <Text dimColor>
-            {r2.space}
-            {r2.right}
-          </Text>
+        <Box key="row2">
+          {whoT !== '' && <Text color={ROLE_NAMED[role]}>{whoT}</Text>}
+          <Text {...(who === '' ? { dimColor: true } : {})}>{leftT}</Text>
+          <Text>{space2}</Text>
+          {rightT !== '' && <Text dimColor>{rightT}</Text>}
         </Box>
+        {barRow}
       </Box>
     )
   })

@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
-import { costRecord, isSafeId, splitCells, sync, tokensText, typeColor } from '../hooks/pricing'
+import { diff, lineOf, markOf } from '../hooks/diff'
+import { change, commit, roleOf, touch } from '../hooks/files'
+import { costRecord, isSafeId, splitCells, sync, tokensText } from '../hooks/pricing'
 
 const PANE = {
   plugin: 'agents-pane',
@@ -141,7 +143,7 @@ test("no '+' after the total before any agent has a cost; a '+' when some have n
   expect(await total('desktop')).toBe('$1.73')
 })
 
-test('ledger: an end time once, counts never go down, types keep their first color slot', async () => {
+test('ledger: an end time once, counts never go down, types keep their first-seen order', async () => {
   const empty = { sessionId: 's', types: [], order: [], agents: {}, main: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, mainTurns: 0, sessionUsd: null, limits: [], limitsAt: null }
   const snap = (id: string, type: string, status: string, out: number) => ({
     id,
@@ -162,8 +164,6 @@ test('ledger: an end time once, counts never go down, types keep their first col
   expect(b.agents.x?.endTime).toBe(300)
   expect(b.agents.x?.tokens.output).toBe(10)
   expect(sync(b, [snap('x', 'Explore', 'completed', 10)], 400).agents.x?.endTime).toBe(300)
-  expect(typeColor(0, false)).not.toBe(typeColor(1, false))
-  expect(typeColor(8, true)).toBe(typeColor(0, true))
 })
 
 test('helpers: token rounding', async () => {
@@ -332,4 +332,106 @@ test('plan limits: an empty reading keeps the last one, a lower one replaces it,
   await poke($)
   expect((await paneTexts($, 'desktop')).join('\n')).not.toContain('Plan limits')
   sessionIdNow = 'sess-1'
+})
+
+test('diff: insert, delete, change with word marks, context and line numbers', async () => {
+  const ins = diff('a\nb\nc\n', 'a\nb\nNEW\nc\n', 10)
+  expect(ins.add).toBe(1)
+  expect(ins.del).toBe(0)
+  expect(ins.lines.map(l => `${l.kind}${l.n}`)).toEqual([' 10', ' 11', '+12', ' 12'])
+
+  const del = diff('a\nb\nc', 'a\nc', null)
+  expect(del.lines.map(l => `${l.kind}${l.text}`)).toEqual([' a', '-b', ' c'])
+  expect(del.lines.every(l => l.n === null)).toBe(true)
+
+  const chg = diff('const right = fit(counts, w)', 'const right = fit(advisor, w)', 88)
+  expect(chg.lines.map(l => l.kind)).toEqual(['-', '+'])
+  const [minus, plus] = chg.lines
+  expect(minus?.text.slice(...(minus?.mark ?? [0, 0]))).toBe('counts')
+  expect(plus?.text.slice(...(plus?.mark ?? [0, 0]))).toBe('advisor')
+
+  // Far from a change, kept lines are left out: 2 lines of context each side.
+  const far = diff('1\n2\n3\n4\n5\n6\n7\n8', '1\n2\n3\n4\nX\n6\n7\n8', 1)
+  expect(far.lines.map(l => l.text)).toEqual(['3', '4', '5', 'X', '6', '7'])
+
+  expect(diff('', '', 1)).toEqual({ lines: [], add: 0, del: 0, cut: 0 })
+  // A big rewrite: no LCS table; every line counts; the hunk is capped at 40 lines.
+  const big = diff(Array.from({ length: 300 }, (_, i) => `old ${i}`).join('\n'), Array.from({ length: 300 }, (_, i) => `new ${i}`).join('\n'), 1)
+  expect(big.add).toBe(300)
+  expect(big.del).toBe(300)
+  expect(big.lines.length).toBe(40)
+  expect(big.cut).toBe(560)
+
+  expect(markOf('same', 'same')).toBeNull()
+  expect(markOf('abc', 'xyz')).toBeNull()
+  expect(lineOf('a\nb\nc', 'c')).toBe(3)
+  expect(lineOf('a', 'z')).toBeNull()
+})
+
+test('files: touch, change and commit; roles by type', async () => {
+  let l = touch([], '/r/a.ts', 'main', 1, true)
+  expect(l[0]).toMatchObject({ state: 'read', isActive: true, agents: ['main'] })
+  l = change(l, '/r/a.ts', 'w1', 2, { lines: [{ kind: '+', n: 1, text: 'x' }], cut: 0 }, 1, 0)
+  expect(l[0]).toMatchObject({ state: 'changed', isActive: false, agents: ['main', 'w1'], add: 1, del: 0 })
+  expect(l[0]?.hunks[0]?.agent).toBe('w1')
+  l = touch(l, '/r/b.ts', 'main', 3, false)
+  l = commit(l)
+  expect(l.map(f => f.state)).toEqual(['committed', 'read'])
+  expect(roleOf(undefined)).toBe('main')
+  expect(roleOf('general-purpose')).toBe('worker')
+  expect(roleOf('code-reviewer')).toBe('reviewer')
+  expect(roleOf('Explore')).toBe('explore')
+})
+
+test('pane: files in the lane of the agent that touched them; a press opens the diff; chips hide a role', async ($, on) => {
+  const now = Date.now()
+  const disk = new Map<string, string>([['/repo/src/b.ts', 'one\nconst x = fit(counts)\nthree\n']])
+  on('fs.read', (_: unknown, e: { path: string }) => {
+    const text = disk.get(e.path)
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: {} }))
+  await setup($, on, () => [agent('r1', 'running', 0.5, now - 5_000, 'code-reviewer')])
+  await poke($)
+
+  await $.tool.call({ tool: 'Read', file_path: '/src/a.ts' })
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/src/b.ts', old_string: 'const x = fit(counts)', new_string: 'const x = fit(advisor)', agentId: 'r1' } as never)
+
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The main lane has a.ts (read); the reviewer's lane has b.ts with its counts.
+  expect((await ui.find({ key: 'lane-main' }))?.text).toContain('a.ts')
+  expect((await ui.find({ key: 'lane-main' }))?.text).not.toContain('b.ts')
+  const row = await ui.find({ key: 'f-r1|/repo/src/b.ts' })
+  expect(row?.text).toContain('b.ts')
+  expect(row?.text).toContain('+1')
+  expect(row?.text).toContain('−1')
+  expect((await ui.find({ type: 'Text', text: 'REVIEWER' }))).toBeDefined()
+  await ui.press({ key: 'f-r1|/repo/src/b.ts' })
+  await ui.unmount()
+
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const all = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  expect(all.join('|')).toContain('line 2')
+  // The changed words carry the stronger mark.
+  const marks = (await ui.findAll({ type: 'Text' })).filter(t => t.props.backgroundColor !== undefined).map(t => t.text)
+  expect(marks).toEqual(['counts', 'advisor'])
+  // Hide reviewers: the lane goes; the totals stay.
+  await ui.press({ key: 'role-reviewer' })
+  await ui.unmount()
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'f-r1|/repo/src/b.ts' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join('|')).toContain('1 subagent')
+  await ui.unmount()
+
+  // Show reviewers again; a commit marks the changed file committed (terminal: a plain list).
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'role-reviewer' })
+  await ui.unmount()
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m "x"' })
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await term.find({ type: 'Text', text: /a\.ts/ }))?.text).toContain('○')
+  expect((await term.find({ type: 'Text', text: /b\.ts/ }))?.text).toContain('✔')
+  await term.unmount()
 })

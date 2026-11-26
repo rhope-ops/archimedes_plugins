@@ -41,8 +41,37 @@ export type Ledger = {
 
 export type UsageLimit = { kind: string; percentUsed: number; resetsAt: string | null }
 
+// One line of a diff: kept (' '), added ('+') or removed ('-'); its line number when known; and the
+// changed middle of the line [start, end) in characters, when it pairs with a line on the other side.
+export type DiffLine = { kind: ' ' | '+' | '-'; n: number | null; text: string; mark?: [number, number] }
+
+// One change to a file by one agent ('main' for the main conversation).
+export type FileHunk = { agent: string; at: number; lines: DiffLine[]; cut: number }
+
+// A file an agent read or changed in this session. Content is kept only as capped diff hunks.
+export type FileEntry = {
+  path: string
+  state: 'read' | 'changed' | 'committed'
+  // True while a tool works on it.
+  isActive: boolean
+  at: number
+  // Agent ids that touched it ('main' for the main conversation), first toucher first.
+  agents: string[]
+  add: number
+  del: number
+  hunks: FileHunk[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'agents-pane': { tick: Tick; ledger: Shaped<Ledger> }
+    'agents-pane': {
+      tick: Tick
+      ledger: Shaped<Ledger>
+      files: Shaped<FileEntry[]>
+      // Roles hidden by the role chips.
+      hiddenRoles: string[]
+      // The open diff: "<agent id>|<path>", or '' when none.
+      openFile: string
+    }
   }
 }
