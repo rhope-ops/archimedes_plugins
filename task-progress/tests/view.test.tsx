@@ -199,7 +199,7 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   // The role label never shrinks: it sits in the fixed left column, the same width as the clock's.
   const gutters = (await ui.findAll({ type: 'Box' })).filter(b => b.key === 'gutter')
   expect(gutters.length).toBe(2)
-  for (const g of gutters) expect(g.props.width).toBe(GUTTER)
+  for (const g of gutters) expect(g.props.minWidth).toBe(GUTTER)
   // One face and one size: no Text of rows 1 and 2 sets a size or the monospaced face
   // (the meter's blank cells are the only Texts with a size).
   for (const t of (await ui.findAll({ type: 'Text' })).filter(t => t.text !== ' ')) {
@@ -212,7 +212,7 @@ test('desktop: 3 rows; estimate at the right, then file and advisor, then the ce
   // The right column has one width on rows 1 and 2, flush right.
   const cols = (await ui.findAll({ type: 'Box' })).filter(b => b.key === 'metrics' || b.key === 'advisor')
   expect(cols.length).toBe(2)
-  expect(cols[0]?.props.width).toBe(cols[1]?.props.width)
+  expect(cols[0]?.props.minWidth).toBe(cols[1]?.props.minWidth)
   for (const c of cols) expect(c.props.justifyContent).toBe('flex-end')
   await ui.unmount()
 })

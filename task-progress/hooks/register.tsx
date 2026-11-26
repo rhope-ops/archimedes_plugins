@@ -403,8 +403,9 @@ export const register: Register = on => {
         </Text>
       )
       // Rows 1 and 2 share one left column, so the goal and the file start at the same place.
+      // A minimum, not a fixed width: a proportional face never clips the clock or the role.
       const gutter = (child: ReturnType<typeof tx> | false) => (
-        <Box key="gutter" width={GUTTER} flexShrink={0} flexDirection="row" flexWrap="nowrap">
+        <Box key="gutter" minWidth={GUTTER} flexShrink={0} flexDirection="row" flexWrap="nowrap">
           {child}
         </Box>
       )
@@ -421,7 +422,7 @@ export const register: Register = on => {
       const right2 = [advisorText, pips].filter(x => x !== '').join(' ')
       const rightW = Math.max(cellWidth(right1), cellWidth(right2))
       const rightCol = (key: string, children: ReturnType<typeof tx>[] | ReturnType<typeof tx> | false) => (
-        <Box key={key} width={rightW} flexShrink={0} flexDirection="row" flexWrap="nowrap" justifyContent="flex-end" alignItems="center" columnGap={1}>
+        <Box key={key} minWidth={rightW} flexShrink={0} flexDirection="row" flexWrap="nowrap" justifyContent="flex-end" alignItems="center" columnGap={1}>
           {children}
         </Box>
       )
